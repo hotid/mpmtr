@@ -268,3 +268,31 @@ func (b *TokenBucket) Tokens(now int64) float64 {
 	b.refill(now)
 	return b.tokens
 }
+
+// Level compares the newest samples of v (oldest first) with the ones
+// before them. shift: the median of the last `recent` samples stands above
+// the median of the earlier ones by more than five times their spread.
+// spike: only the last sample does. The spread is the median absolute
+// deviation scaled to a standard deviation, and never taken smaller than
+// 5 % of the earlier median or 50 µs, so that a very steady series does
+// not turn every flicker into an anomaly. ok is false with fewer than
+// 3·recent samples: too little history to say.
+func Level(v []uint32, recent int) (shift, spike, ok bool) {
+	if recent < 1 || len(v) < 3*recent {
+		return false, false, false
+	}
+	base := slices.Clone(v[:len(v)-recent])
+	slices.Sort(base)
+	bm := float64(quantileSorted(base, 0.5))
+	dev := make([]uint32, len(base))
+	for i, x := range base {
+		dev[i] = uint32(math.Abs(float64(x) - bm))
+	}
+	slices.Sort(dev)
+	spread := max(1.4826*float64(quantileSorted(dev, 0.5)), 0.05*bm, 50)
+	last := slices.Clone(v[len(v)-recent:])
+	slices.Sort(last)
+	shift = float64(quantileSorted(last, 0.5))-bm > 5*spread
+	spike = !shift && float64(v[len(v)-1])-bm > 5*spread
+	return shift, spike, true
+}

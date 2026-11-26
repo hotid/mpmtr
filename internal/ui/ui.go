@@ -570,6 +570,34 @@ func dashName(s string) string {
 	return s
 }
 
+// cellStyle marks the cells of a row whose numbers the rows after it bear
+// out: loss that goes on to the destination (red on a hop; on a DST or
+// server row yellow, red when nothing is answered), round-trip times above
+// the row's own history (yellow: Last and Med for a lasting rise, Last
+// alone for a single late answer). A hop that only answers poorly itself
+// gets nothing here (its whole row is dimmed). end restores what the line
+// is drawn in.
+func cellStyle(h core.HopSnap, end string) report.CellStyle {
+	const red, yellow = "\x1b[1;31m", "\x1b[1;33m"
+	st := report.CellStyle{End: end}
+	if h.RateLimit {
+		return st
+	}
+	if h.LossPersists {
+		st.Loss = red
+		if (h.Kind == core.KindDst || h.Kind == core.KindServer) && h.Replies > 0 {
+			st.Loss = yellow
+		}
+	}
+	switch {
+	case h.RTTShift:
+		st.Last, st.Med = yellow, yellow
+	case h.RTTSpike:
+		st.Last = yellow
+	}
+	return st
+}
+
 // dim greys a line out (ICMP rate-limited hop: its loss is not real loss).
 func dim(l string) string { return "\x1b[2m" + l + reset }
 
@@ -743,7 +771,7 @@ func (u *UI) render(s *core.Snapshot) {
 		if u.srvSel >= len(sv) {
 			u.srvSel = max(0, len(sv)-1)
 		}
-		add(&body, "\x1b[2m%s\x1b[0m", report.ServerHeader)
+		add(&body, "\x1b[2m%s\x1b[0m", report.ServerHeaderFor(names))
 		u.srvLine = len(body)
 		for i, sv := range sv {
 			pre := ""
@@ -751,7 +779,8 @@ func (u *UI) render(s *core.Snapshot) {
 				pre = "\x1b[7m"
 				u.srvLine = len(body)
 			}
-			add(&body, "%s%s%s%s", pre, color(sv.State), report.ServerLine(sv, routeNames(rn, sv.Groups)), reset)
+			line := pre + color(sv.State)
+			add(&body, "%s%s%s", line, report.ServerLine(sv, routeNames(rn, sv.Groups), names, cellStyle(sv.E2E, reset+line)), reset)
 		}
 		add(&body, "\x1b[2m  ↑↓ select · Enter: the route to the server (its measured port) · Esc there returns here\x1b[0m")
 	case viewFlows:
@@ -828,7 +857,7 @@ func (u *UI) render(s *core.Snapshot) {
 			add(&body, "\x1b[2m%s\x1b[0m", report.HopHeaderFor(names))
 			notes := report.PathNotes(f.Hops, names)
 			for i, hs := range f.Hops {
-				l := report.HopLineNote(hs, names, "", notes[i])
+				l := report.HopLineStyled(hs, names, "", notes[i], cellStyle(hs, reset))
 				if hs.RateLimit {
 					l = dim(l)
 				}
@@ -963,6 +992,11 @@ var helpText = []string{
 	"  Snt            probes sent to this hop",
 	"  Last Med P95   round-trip time, ms: the last one, the median, the 95th percentile,",
 	"  Best Wrst Jttr the best, the worst, the jitter",
+	"  red Loss%      the loss goes on at every hop after this one, down to the destination:",
+	"                 it starts here (a router that only answers poorly stays plain)",
+	"  yellow Last Med  slower than this row's own earlier samples, and so is every hop",
+	"                 after it and the destination: the delay grew here (Last alone on DST:",
+	"                 one late answer)",
 	"  PLUGIN         what the --hop-info plugins say (e.g. the interface that owns the address);",
 	"                 on DST and server rows what the --app plugin notes (e.g. the HTTP status)",
 	"",
@@ -1092,7 +1126,7 @@ func (u *UI) renderTree(body *[]string, rows []core.TreeRow, rn map[string]strin
 				mark = "▾"
 			}
 		}
-		l := report.HopLineNote(r.Hop, names, mark+r.Prefix, notes[v.i])
+		l := report.HopLineStyled(r.Hop, names, mark+r.Prefix, notes[v.i], cellStyle(r.Hop, reset))
 		if r.Hop.RateLimit {
 			l = dim(l)
 		}

@@ -112,6 +112,21 @@ type HopSnap struct {
 	MPLSStacks [][]uint32 `json:"mpls_stacks,omitempty"`
 	Flows      int        `json:"flows"`
 	Name       string     `json:"name,omitempty"`
+	// What the row's numbers say once the rows after it are taken into
+	// account (the live screen colours by these).
+	// LossPersists: the hop's share of unanswered probes is significant and
+	// so is that of every answering hop after it, down to a destination
+	// that loses end to end. On a DST or server row: its own end-to-end
+	// loss is significant.
+	// RTTShift: the row's recent round-trip times stand above its own
+	// earlier ones, and on a hop row the same holds on every hop after it,
+	// down to the destination. RTTSpike (DST and server rows): only the
+	// last sample does.
+	LossPersists bool `json:"loss_persists_downstream,omitempty"`
+	RTTShift     bool `json:"rtt_shift,omitempty"`
+	RTTSpike     bool `json:"rtt_spike,omitempty"`
+	rttUp        bool // the row's own recent RTT is above its history
+	rttKnown     bool // enough samples to say so
 }
 
 // FlowSnap is one flow.
@@ -487,6 +502,11 @@ func (c *Core) flowHops(f *Flow) []HopSnap {
 		}
 		out = append(out, hs)
 	}
+	ps, parent := make([]*HopSnap, len(out)), make([]int, len(out))
+	for i := range out {
+		ps[i], parent[i] = &out[i], i-1
+	}
+	markDownstream(ps, parent) // one path: every hop hangs under the one before it
 	return collapseNoReply(out)
 }
 
@@ -520,6 +540,7 @@ func collapseNoReply(in []HopSnap) []HopSnap {
 func (c *Core) aggHops(hs []*HopStat, ttl TTL) HopSnap {
 	s := HopSnap{TTL: ttl, Flows: len(hs)}
 	var v []uint32
+	judged, shifted := 0, 0
 	resp := map[netip.Addr]uint32{}
 	var lastAt Mono
 	var lastProbe Mono
@@ -533,7 +554,16 @@ func (c *Core) aggHops(hs []*HopStat, ttl TTL) HopSnap {
 		s.Sent += h.Sent
 		s.Replies += h.Replies
 		s.LowConf += h.LowConf
+		from := len(v)
 		h.rtt.Do(func(x uint32) { v = append(v, x) })
+		// Each port's samples are judged against that port's own history
+		// (they are in time order only within one port).
+		if sh, _, ok := stats.Level(v[from:], hopRecent); ok {
+			judged++
+			if sh {
+				shifted++
+			}
+		}
 		s.Unstable = s.Unstable || h.Unstable || h.multi() >= 2
 		s.Unreach = s.Unreach || h.UnreachSeen
 		h.responders(func(a netip.Addr, n uint32) { resp[a] += n })
@@ -577,6 +607,8 @@ func (c *Core) aggHops(hs []*HopStat, ttl TTL) HopSnap {
 		s.Loss = fp(float64(s.Sent-s.Replies) / float64(s.Sent))
 		s.LossOK = true
 	}
+	// The row's RTT is up when at least half of the ports that can say see it.
+	s.rttKnown, s.rttUp = judged > 0, shifted > 0 && 2*shifted >= judged
 	sum := stats.Summarize(v)
 	s.Min, s.Median, s.P95, s.Max = sum.Min, sum.Median, sum.P95, sum.Max
 	if lastProbe != 0 {
@@ -862,7 +894,68 @@ func (c *Core) buildTree(ep *Endpoint) []TreeRow {
 	}
 	walk(root, "", "", -1)
 	markRateLimited(rows)
+	hs, parent := make([]*HopSnap, len(rows)), make([]int, len(rows))
+	for i := range rows {
+		hs[i], parent[i] = &rows[i].Hop, rows[i].Parent
+	}
+	markDownstream(hs, parent)
 	return rows
+}
+
+// hopRecent and e2eRecent: how many of the newest RTT samples of a hop (a
+// port keeps 16) and of a measured port (128) are compared with the ones
+// before them.
+const (
+	hopRecent = 4
+	e2eRecent = 8
+)
+
+// lossElevated: lost of n unanswered is significantly more than nothing
+// (the rule of the loss analysis: Wilson lower bound above 5 %).
+func lossElevated(lost, n uint32) bool {
+	if n < 5 {
+		return false
+	}
+	lo, _ := stats.Wilson(int64(lost), int64(n))
+	return lo > 0.05
+}
+
+// markDownstream sets LossPersists and RTTShift on hop rows: what a hop's
+// own numbers show counts only when every answering hop after it shows it
+// too, down to a destination that shows it end to end, and that on every
+// branch under it (a fault of the hop itself would reach them all). A
+// router that answers poorly or slowly while traffic passes it unharmed is
+// thereby left unmarked. rows[i] hangs under rows[parent[i]] (-1: the
+// top), a parent comes before its rows; DST and server rows are set
+// already.
+func markDownstream(rows []*HopSnap, parent []int) {
+	type carry struct{ seen, loss, rtt bool } // over the rows right under i: all of them carry it
+	below := make([]carry, len(rows))
+	for i := len(rows) - 1; i >= 0; i-- {
+		h := rows[i]
+		b := below[i]
+		l, r := b.seen && b.loss, b.seen && b.rtt
+		switch {
+		case h.Kind == KindDst || h.Kind == KindServer:
+			l, r = l || h.LossPersists, r || h.RTTShift
+		default:
+			if h.Replies > 0 && h.Kind != KindSilent && h.Sent >= 5 {
+				l = l && !h.RateLimit && lossElevated(h.Sent-h.Replies, h.Sent)
+				h.LossPersists = l
+			}
+			if h.rttKnown {
+				r = r && h.rttUp
+				h.RTTShift = r
+			}
+		}
+		if p := parent[i]; p >= 0 && p < i {
+			c := &below[p]
+			if !c.seen {
+				c.seen, c.loss, c.rtt = true, true, true
+			}
+			c.loss, c.rtt = c.loss && l, c.rtt && r
+		}
+	}
 }
 
 // markRateLimited flags tree hops whose pooled loss is significant while
@@ -925,13 +1018,24 @@ func (c *Core) e2eFlowsAsHop(fl []*Flow, h *HopSnap) {
 	var jit float64
 	var n int
 	var last Mono
+	spike, spikeAt := false, Mono(0)
 	for _, f := range fl {
 		if !f.Role.Monitored() {
 			continue
 		}
 		valid += f.C.Valid()
 		fail += f.C.Failures()
+		from := len(v)
 		f.rtt.ring.Do(func(x rttSample) { v = append(v, x.us) })
+		if sh, sp, ok := stats.Level(v[from:], e2eRecent); ok {
+			h.rttKnown = true
+			h.rttUp = h.rttUp || sh
+			if f.lastE2E >= spikeAt && sp {
+				spike, spikeAt = true, f.lastE2E
+			} else if f.lastE2E > spikeAt {
+				spike, spikeAt = false, f.lastE2E
+			}
+		}
 		if f.rtt.n > 0 {
 			if h.Min == 0 || f.rtt.min < h.Min {
 				h.Min = f.rtt.min
@@ -950,6 +1054,8 @@ func (c *Core) e2eFlowsAsHop(fl []*Flow, h *HopSnap) {
 	h.Sent, h.Replies = uint32(valid), uint32(valid-fail)
 	l := float64(fail) / float64(valid)
 	h.Loss, h.LossOK = &l, true
+	h.RTTShift, h.RTTSpike = h.rttUp, spike && !h.rttUp
+	h.LossPersists = lossElevated(h.Sent-h.Replies, h.Sent)
 	sum := stats.Summarize(v)
 	h.Median, h.P95 = sum.Median, sum.P95
 	if n > 0 {

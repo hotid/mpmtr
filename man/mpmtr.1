@@ -538,7 +538,17 @@ row's timing comes from the hop's own router;
 .B icmp-limit?
 \(em the router limits its ICMP replies: a later hop of the same route loses
 significantly less (the 95 % intervals do not overlap), which points to ICMP
-rate limiting rather than to loss of forwarded traffic (the row is dimmed);
+rate limiting rather than to loss of forwarded traffic (the row is dimmed;
+on the live screen a hop's
+.B Loss%
+is red when the loss goes on at every answering hop after it, on every
+branch, down to a destination that loses end to end, and
+.BR Last " and " Med
+are yellow when the round-trip time stands above the row's own history at
+that hop, every hop after it and the destination; JSON:
+.BR loss_persists_downstream ,
+.BR rtt_shift ,
+.BR rtt_spike );
 .B stale
 \(em not refreshed recently (the hop budget is shared; a DOWN flow gives every
 second E2E slot to its hop probes, so its route stays fresh);

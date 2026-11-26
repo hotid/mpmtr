@@ -59,3 +59,23 @@ func TestPluginColumn(t *testing.T) {
 		t.Errorf("row without plugins %q", l)
 	}
 }
+
+// The server list has the PLUGIN column too: what the application plugin
+// notes about a server stands under it, before the state.
+func TestServerLinePluginColumn(t *testing.T) {
+	names := pluginNames{width: 6}
+	s := core.ServerSnap{Name: "S4", Hz: 1000, Ports: 3}
+	s.E2E.AppNote = "200"
+	head := ServerHeaderFor(names)
+	line := ServerLine(s, nil, names, CellStyle{})
+	col := strings.Index(head, "PLUGIN")
+	if col < 0 || !strings.Contains(head, "SERVER") {
+		t.Fatalf("header: %q", head)
+	}
+	if got := []rune(line); len(got) < col+3 || string(got[col:col+3]) != "200" {
+		t.Fatalf("note not under PLUGIN (column %d):\n%s\n%s", col, head, line)
+	}
+	if strings.Contains(ServerHeaderFor(nil), "PLUGIN") || strings.Contains(ServerLine(s, nil, nil, CellStyle{}), "200") {
+		t.Fatalf("PLUGIN column without plugins")
+	}
+}

@@ -178,6 +178,27 @@ func PathNotes(hops []core.HopSnap, names Names) []string {
 
 // HopLineNote is HopLineTree with the annotation given ("" = none).
 func HopLineNote(h core.HopSnap, names Names, prefix, note string) string {
+	return HopLineStyled(h, names, prefix, note, CellStyle{})
+}
+
+// CellStyle is what a terminal puts around single cells of a hop row
+// (escape sequences that take no width); the zero value changes nothing.
+type CellStyle struct {
+	Loss, Last, Med string // written before the cell
+	End             string // written after a cell that got one
+}
+
+func (st CellStyle) paint(pre, cell string) string {
+	if pre == "" {
+		return cell
+	}
+	// the padding stays outside: only the number is marked
+	t := strings.TrimLeft(cell, " ")
+	return cell[:len(cell)-len(t)] + pre + t + st.End
+}
+
+// HopLineStyled is HopLineNote with single cells marked for a terminal.
+func HopLineStyled(h core.HopSnap, names Names, prefix, note string, st CellStyle) string {
 	var host string
 	switch h.Kind {
 	case core.KindSilent:
@@ -287,11 +308,13 @@ func HopLineNote(h core.HopSnap, names Names, prefix, note string) string {
 		// route of a DST row) stays under FLAGS
 		tail = pn + strings.Repeat(" ", w-len([]rune(pn))) + " " + tail
 	}
+	lossCell := st.paint(st.Loss, fmt.Sprintf("%6s", loss))
 	if h.Replies == 0 {
-		return fmt.Sprintf("%-5s %s %6s %4d %46s %s", ttl, host, loss, h.Sent, "", tail)
+		return fmt.Sprintf("%-5s %s %s %4d %46s %s", ttl, host, lossCell, h.Sent, "", tail)
 	}
-	return fmt.Sprintf("%-5s %s %6s %4d %7s %7s %7s %7s %7s %6s %s",
-		ttl, host, loss, h.Sent, Ms(h.Last), Ms(h.Median), Ms(h.P95), Ms(h.Min), Ms(h.Max),
+	return fmt.Sprintf("%-5s %s %s %4d %s %s %7s %7s %7s %6s %s",
+		ttl, host, lossCell, h.Sent, st.paint(st.Last, fmt.Sprintf("%7s", Ms(h.Last))),
+		st.paint(st.Med, fmt.Sprintf("%7s", Ms(h.Median))), Ms(h.P95), Ms(h.Min), Ms(h.Max),
 		Ms(uint32(h.Jitter)), tail)
 }
 
@@ -398,9 +421,15 @@ func AnycastLine(e core.EPSnap) string {
 // ServerHeader is the header of the server list (columns as the tree's).
 var ServerHeader = strings.Replace(HopHeader, "TTL   HOST    ", "      SERVER  ", 1)
 
+// ServerHeaderFor is ServerHeader with the PLUGIN column when names has
+// plugins (what the application plugin notes about each server).
+func ServerHeaderFor(names Names) string {
+	return strings.Replace(HopHeaderFor(names), "TTL   HOST    ", "      SERVER  ", 1)
+}
+
 // ServerLine is one server of the list: its end-to-end numbers in the
 // tree's columns, then state, measured port, ports, route, app checks.
-func ServerLine(s core.ServerSnap, routes []string) string {
+func ServerLine(s core.ServerSnap, routes []string, names Names, cs CellStyle) string {
 	h := s.E2E
 	h.Kind, h.Server, h.Name = core.KindServer, s.Name, fmt.Sprintf("%.0f Hz", s.Hz)
 	st := s.State
@@ -425,7 +454,7 @@ func ServerLine(s core.ServerSnap, routes []string) string {
 	if s.App[0] > 0 {
 		tag += fmt.Sprintf(" · app %d of %d failed", s.App[1], s.App[0])
 	}
-	return HopLineTree(h, nil, "") + "  " + tag
+	return HopLineStyled(h, names, "", "", cs) + "  " + tag
 }
 
 // RouteState is the state word of a route: OK, LOSS, DOWN, WARMUP,

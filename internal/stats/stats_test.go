@@ -107,3 +107,58 @@ func TestTokenBucket(t *testing.T) {
 		t.Fatal("burst after idle", n)
 	}
 }
+
+func TestLevel(t *testing.T) {
+	steady := func(n int, base uint32) []uint32 {
+		v := make([]uint32, n)
+		for i := range v {
+			v[i] = base + uint32(i%5)*base/200 // ±1 %
+		}
+		return v
+	}
+	if _, _, ok := Level(steady(11, 1000), 4); ok {
+		t.Fatal("11 samples judged with recent 4")
+	}
+	if sh, sp, ok := Level(steady(40, 170000), 8); !ok || sh || sp {
+		t.Fatalf("steady series: shift %v spike %v ok %v", sh, sp, ok)
+	}
+	v := steady(40, 170000)
+	v[39] = 400000
+	if sh, sp, _ := Level(v, 8); sh || !sp {
+		t.Fatalf("one late sample far above: shift %v spike %v", sh, sp)
+	}
+	for i := 32; i < 40; i++ {
+		v[i] = 260000
+	}
+	if sh, sp, _ := Level(v, 8); !sh || sp {
+		t.Fatalf("the last 8 samples half as high again: shift %v spike %v", sh, sp)
+	}
+	// 10 % up is inside what a path does by itself.
+	v = steady(40, 170000)
+	for i := 32; i < 40; i++ {
+		v[i] = 187000
+	}
+	if sh, sp, _ := Level(v, 8); sh || sp {
+		t.Fatalf("10 %% up: shift %v spike %v", sh, sp)
+	}
+	// A LAN hop of 100 µs: 0.2 ms more is noise, 2 ms is not.
+	v = steady(16, 100)
+	v[15] = 300
+	if sh, sp, _ := Level(v, 4); sh || sp {
+		t.Fatalf("0.1 → 0.3 ms: shift %v spike %v", sh, sp)
+	}
+	for i := 12; i < 16; i++ {
+		v[i] = 2100
+	}
+	if sh, _, _ := Level(v, 4); !sh {
+		t.Fatal("0.1 → 2.1 ms on the last 4 samples is not a shift")
+	}
+	// Getting faster is never an anomaly.
+	v = steady(40, 170000)
+	for i := 32; i < 40; i++ {
+		v[i] = 60000
+	}
+	if sh, sp, _ := Level(v, 8); sh || sp {
+		t.Fatalf("faster: shift %v spike %v", sh, sp)
+	}
+}

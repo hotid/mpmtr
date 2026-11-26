@@ -212,6 +212,19 @@ TTL   HOST                                      Loss%  Snt    Last     Med     P
     less — the 95% intervals do not overlap — which points to the router
     limiting its ICMP answers rather than to loss of forwarded traffic; the
     row is dimmed.
+  * **Colours on the live screen** mark what the rows after a hop bear out,
+    never a number by itself. A hop's `Loss%` is red when every answering
+    hop after it, on every branch under it, loses too, down to a
+    destination that loses end to end: that is where the loss starts. A
+    router that only answers poorly stays plain. `Last` and `Med` are
+    yellow when the round-trip time stands above the row's own earlier
+    samples, and on a hop only when the same holds on every hop after it
+    and at the destination: the segment where the delay grew. `Last` alone
+    is yellow on a DST or server row for one late answer. A row needs
+    samples of its own first: 12 answers of a port on a hop (the last 4
+    against the 12 before), 24 end-to-end on a DST row. The text report and
+    JSON have no colours; JSON has the same marks as
+    `loss_persists_downstream`, `rtt_shift` and `rtt_spike`.
   * **`stale`** (flag) — not refreshed recently: hop budget is shared, see
     rate limits.
   * **`mpls:`** (flag) — RFC 4950 labels: `a/b` is one stack, outermost

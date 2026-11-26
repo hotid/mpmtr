@@ -101,3 +101,108 @@ func TestTreeStructure(t *testing.T) {
 		}
 	}
 }
+
+// Loss and slow answers on a hop are marked only when they go on to the
+// destination, on every branch under the hop.
+func TestMarkDownstream(t *testing.T) {
+	hop := func(sent, replies uint32, up bool) *HopSnap {
+		return &HopSnap{Kind: KindHop, Sent: sent, Replies: replies, rttKnown: true, rttUp: up}
+	}
+	dst := func(loss, up bool) *HopSnap {
+		return &HopSnap{Kind: KindDst, Sent: 100, Replies: 100, LossPersists: loss, RTTShift: up}
+	}
+	// One path: 1 fine, 2 loses and is slow, 3 too (silent 4 between), DST too.
+	rows := []*HopSnap{hop(100, 100, false), hop(100, 60, true), hop(100, 70, true), {Kind: KindSilent, Sent: 20}, dst(true, true)}
+	markDownstream(rows, []int{-1, 0, 1, 2, 3})
+	for i, want := range []bool{false, true, true, false} {
+		if rows[i].LossPersists != want || rows[i].RTTShift != want {
+			t.Errorf("path hop %d: loss %v rtt %v, want %v", i+1, rows[i].LossPersists, rows[i].RTTShift, want)
+		}
+	}
+	// A hop that loses while the next one does not: its router answers
+	// poorly, nothing is marked, also when the destination loses.
+	rows = []*HopSnap{hop(100, 50, true), hop(100, 100, false), dst(true, true)}
+	markDownstream(rows, []int{-1, 0, 1})
+	if rows[0].LossPersists || rows[0].RTTShift {
+		t.Errorf("rate-limiting hop marked: %+v", *rows[0])
+	}
+	// The destination is fine: nothing above it is marked.
+	rows = []*HopSnap{hop(100, 50, true), hop(100, 50, true), dst(false, false)}
+	markDownstream(rows, []int{-1, 0, 1})
+	if rows[0].LossPersists || rows[1].LossPersists || rows[1].RTTShift {
+		t.Errorf("marked above a healthy destination")
+	}
+	// A hop with two branches, only one of them losing to its destination:
+	// the fault is on that branch, not on the shared hop.
+	rows = []*HopSnap{hop(100, 60, true), hop(100, 60, true), dst(true, true), hop(100, 100, false), dst(false, false)}
+	markDownstream(rows, []int{-1, 0, 1, 0, 3})
+	if rows[0].LossPersists || rows[0].RTTShift || !rows[1].LossPersists || !rows[1].RTTShift {
+		t.Errorf("branches: shared %v/%v, losing branch %v/%v", rows[0].LossPersists, rows[0].RTTShift, rows[1].LossPersists, rows[1].RTTShift)
+	}
+	// Too few probes on a hop: it neither confirms nor breaks the chain.
+	rows = []*HopSnap{hop(100, 60, true), {Kind: KindHop, Sent: 3, Replies: 1}, dst(true, true)}
+	markDownstream(rows, []int{-1, 0, 1})
+	if !rows[0].LossPersists || rows[1].LossPersists {
+		t.Errorf("thin hop: %v %v", rows[0].LossPersists, rows[1].LossPersists)
+	}
+}
+
+// End to end on the simulated network: a hop that becomes slow, with the
+// hops after it and the destination, marks those rows as slower than they
+// were; a hop that only answers its own ICMP slowly marks nothing.
+func TestTreeMarksSlowSegment(t *testing.T) {
+	cfg := simpleCfg()
+	cfg.Discovery = true
+	cfg.Flows = 1
+	p := linear(4, 10*time.Millisecond)
+	for i := range p.hops {
+		p.hops[i].rtt = time.Duration(i+1) * 2 * time.Millisecond
+	}
+	s := newSim(t, cfg, func(*Flow, Mono) *simPath { return p })
+	s.add(4)
+	rowsOf := func() []TreeRow { return s.c.Snapshot(SnapOpts{Tree: true, Only: AllEndpoints}).Endpoints[0].Tree }
+	s.run(3 * time.Minute)
+	for _, r := range rowsOf() {
+		if r.Hop.RTTShift || r.Hop.RTTSpike || r.Hop.LossPersists {
+			t.Fatalf("marked on a steady path: %+v", r.Hop)
+		}
+	}
+	// From hop 3 on everything takes 40 ms longer.
+	p.hops[2].rtt += 40 * time.Millisecond
+	p.hops[3].rtt += 40 * time.Millisecond
+	p.rtt += 40 * time.Millisecond
+	s.run(15 * time.Second)
+	marked := map[TTL]bool{}
+	for _, r := range rowsOf() {
+		if r.Hop.Kind == KindHop || r.Hop.Kind == KindDst {
+			marked[r.Hop.TTL] = r.Hop.RTTShift
+		}
+	}
+	if marked[1] || marked[2] || !marked[3] || !marked[4] || !marked[5] {
+		t.Fatalf("rows marked slower: %v, want TTL 3, 4 and the destination (5)", marked)
+	}
+
+	// On a second endpoint, hop 2 alone answers 40 ms later (its own ICMP is
+	// slow), traffic through it is not: nothing is marked.
+	q := linear(4, 10*time.Millisecond)
+	s2 := newSim(t, cfg, func(*Flow, Mono) *simPath { return q })
+	s2.add(4)
+	s2.run(3 * time.Minute)
+	q.hops[1].rtt += 40 * time.Millisecond
+	s2.run(15 * time.Second)
+	for _, r := range s2.c.Snapshot(SnapOpts{Tree: true, Only: AllEndpoints}).Endpoints[0].Tree {
+		if r.Hop.RTTShift {
+			t.Fatalf("slow ICMP of one hop marked TTL %d", r.Hop.TTL)
+		}
+	}
+	// Without the later hops: the hop itself would be up.
+	var up bool
+	for _, r := range s2.c.Snapshot(SnapOpts{Tree: true, Only: AllEndpoints}).Endpoints[0].Tree {
+		if r.Hop.TTL == 2 && r.Hop.Kind == KindHop {
+			up = r.Hop.rttUp
+		}
+	}
+	if !up {
+		t.Fatal("hop 2 not seen as slower than before: the test proves nothing")
+	}
+}
