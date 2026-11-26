@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Hop-information plugin for mpmtr without the Go SDK: names and notes from
+a text file.
+
+    mpmtr --hop-info "static inventory.txt" example.com:443
+
+inventory.txt, one address per line:
+
+    192.0.2.1    core1    rack 12, row B
+    192.0.2.2    edge7
+
+Requests come on stdin and answers go to stdout, one JSON object per line.
+"""
+import json
+import sys
+
+
+def load(path):
+    known = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.split("#", 1)[0].split(None, 2)
+            if len(parts) >= 2:
+                known[parts[0]] = (parts[1], parts[2].strip() if len(parts) > 2 else "")
+    return known
+
+
+def say(obj):
+    # One object per line, flushed at once: mpmtr reads a pipe.
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit('usage: mpmtr --hop-info "static FILE"')
+    known = load(sys.argv[1])  # fail before the hello: mpmtr shows stderr
+    say({"type": "hello", "name": "static", "version": "1"})
+    for line in sys.stdin:  # ends when mpmtr closes stdin
+        try:
+            req = json.loads(line)
+        except ValueError:
+            continue
+        if req.get("type") != "hop":
+            continue  # a message of a later protocol version: ignore
+        name, note = known.get(req.get("addr", ""), ("", ""))
+        # Every request gets an answer, empty when nothing is known.
+        say({"type": "info", "id": req["id"], "name": name, "note": note})
+
+
+if __name__ == "__main__":
+    main()

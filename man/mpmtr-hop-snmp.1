@@ -1,0 +1,306 @@
+.\" -*- coding: UTF-8 -*-
+.\" mpmtr-hop-snmp(1). Keep in sync with cmd/mpmtr-hop-snmp/main.go.
+.TH MPMTR\-HOP\-SNMP 1 "November 2026" "mpmtr" "User Commands"
+.SH NAME
+mpmtr\-hop\-snmp \- hop-information plugin for mpmtr: router name, interface and its errors over SNMP
+.SH SYNOPSIS
+.B mpmtr \-\-hop\-info
+.RB \(dq snmp
+.RB [ \-\-descr ]
+.RB [ \-\-errors ]
+.IR FILE \(dq
+.RI [ options ]
+.IR target [: port ]
+.SH DESCRIPTION
+.B mpmtr\-hop\-snmp
+is a plugin of
+.BR mpmtr (1).
+It is not run by hand:
+.B mpmtr \-\-hop\-info
+starts it, gives it the address of every hop shown, and shows what the
+plugin answers.
+.PP
+For a hop address the plugin asks the router at that address, over SNMP:
+.IP \(bu 2
+its name
+.RB ( sysName ),
+shown as the hop's host name instead of the reverse-DNS one;
+.IP \(bu 2
+the interface that owns the address
+.RB ( ifName ),
+shown in the
+.B PLUGIN
+column;
+.IP \(bu 2
+with
+.BR \-\-descr ,
+that interface's description
+.RB ( ifAlias );
+.IP \(bu 2
+with
+.BR \-\-errors ,
+that interface's receive errors.
+.PP
+.EX
+HOST                        ...  PLUGIN
+core1.example (192.0.2.1)   ...  Ethernet1/2     «to spine 3»  crc:0
+core2.example (192.0.2.5)   ...  Port\-Channel37  «uplink»      err:12 +3
+.EE
+.PP
+Hop addresses come from the network, not from you: a router anywhere on the
+path chooses the address it answers with.
+So the plugin asks nothing unless
+.I FILE
+allows that very address; see
+.BR CONFIGURATION .
+.SH OPTIONS
+The plugin's options go inside the quotes of
+.BR \-\-hop\-info ,
+before the file name.
+.TP
+.B \-\-descr
+Show the interface's description
+.RB ( ifAlias )
+after its name, in «».
+.TP
+.B \-\-errors
+Show the interface's receive errors after that; see
+.BR "ERROR COUNTERS" .
+.TP
+.I FILE
+The configuration: which addresses may be asked and how.
+Required.
+.SH CONFIGURATION
+One line per prefix: the prefix (or a single address), then
+.IR key = value
+pairs separated by spaces.
+.B #
+starts a comment.
+.PP
+.EX
+# SNMPv2c: the community travels in clear text to every address asked
+10.0.0.0/8      community=public
+# SNMPv3 with authentication and encryption
+192.0.2.0/24    user=monitor auth=sha256:secret\-one priv=aes:secret\-two
+# another port and patience for one slow device
+10.1.2.3        community=public port=1161 timeout=3s retries=0
+.EE
+.TP
+.BI community= TEXT
+SNMPv2c with this community.
+.TP
+.BI user= NAME
+SNMPv3 with this user.
+Alone it means no authentication and no encryption.
+.TP
+.BI auth= PROTOCOL : PASSPHRASE
+SNMPv3 authentication:
+.BR md5 ,
+.BR sha ,
+.BR sha224 ,
+.BR sha256 ,
+.BR sha384 ,
+.BR sha512 .
+.TP
+.BI priv= PROTOCOL : PASSPHRASE
+SNMPv3 encryption:
+.BR des ,
+.BR aes ,
+.BR aes192 ,
+.BR aes256 .
+Needs
+.BR auth .
+.TP
+.BI port= N
+UDP port of the agent (default 161).
+.TP
+.BI timeout= D
+How long to wait for one answer (default 1s, at most 10s).
+.TP
+.BI retries= N
+How many times a request is repeated after a timeout (default 1, 0\-5).
+.PP
+Rules:
+.IP \(bu 2
+The longest matching prefix wins.
+.IP \(bu 2
+An address in no prefix is never sent a packet.
+.IP \(bu 2
+A line has either
+.B community
+or
+.BR user ,
+not both.
+.IP \(bu 2
+Passphrases are at least 8 characters and have no spaces (a value ends at
+the first space).
+.IP \(bu 2
+The file must not be readable by group or others
+.RB ( "chmod 600" ):
+it holds credentials, and the plugin refuses a file that is.
+.IP \(bu 2
+A file with no prefixes is an error: nothing would ever be asked.
+.PP
+On any error in the file the plugin prints the line number and what is
+wrong to standard error and exits.
+.SH WHAT IS SENT
+For one address, at most two SNMP GET requests, both to that address.
+No table is walked.
+SNMPv3 adds the exchange in which the device tells its engine ID.
+.IP 1. 4
+.B sysName.0
+and the interface index of the address:
+.B ipAddressIfIndex
+(the table for IPv4 and IPv6) and, for an IPv4 address, also
+.B ipAdEntIfIndex
+(the older IPv4 table, for devices that fill only that one).
+.IP 2. 4
+If an interface index came back:
+.BR ifName ,
+with
+.B \-\-descr
+also
+.BR ifAlias ,
+with
+.B \-\-errors
+also
+.B dot3StatsFCSErrors
+and
+.BR ifInErrors ,
+all for that index, in one request.
+.PP
+If the device knows its name and not the interface of the address, only the
+name is shown.
+If it does not answer, nothing is shown for that address; nothing else
+changes.
+.PP
+The plugin asks at most 8 addresses at a time.
+One request waits
+.B timeout
+and is repeated
+.B retries
+times, so a silent address costs up to timeout \(mu (retries + 1): 2 s by
+default.
+.PP
+How often an address is asked is decided by
+.BR mpmtr :
+once, when the hop is first shown.
+With
+.BI \-\-hop\-info\-interval " D"
+an address still on the screen is asked again when its answer is that old.
+The old answer stays until the new one is in, and a new answer that says
+nothing does not erase it.
+.SH ERROR COUNTERS
+With
+.B \-\-errors
+the note ends with one of:
+.TP
+.BI crc: N
+Frames received with a bad checksum
+.RB ( dot3StatsFCSErrors ).
+Shown when the interface has this counter: a physical Ethernet port.
+.TP
+.BI err: N
+All input errors together
+.RB ( ifInErrors ).
+Shown when the interface has no checksum counter: a port-channel, a VLAN
+interface.
+.TP
+nothing
+The device gives neither.
+.PP
+The counters run since the device booted (or since they were cleared), so
+the number alone says little.
+When
+.B mpmtr
+asks again
+.RB ( \-\-hop\-info\-interval ),
+the plugin adds the growth since its own first look at that address:
+.RS
+.EX
+crc:1532 +12
+.EE
+.RE
+.PP
+means 1532 in total, 12 of them since the plugin first asked.
+A counter that went back (the device restarted, the counters were cleared)
+starts the count anew.
+Without
+.B \-\-hop\-info\-interval
+there is no second look and only the total is shown.
+.SH WHICH INTERFACE
+The interface is the one that owns the address the router answered from.
+That is usually the interface the probe came in through, but a router may
+answer from another interface or from a loopback.
+The interface the traffic leaves through is not told.
+.PP
+A hop on a port-channel or a VLAN interface shows the errors of that
+logical interface, not of the physical ports under it.
+.SH EXAMPLES
+Names and interfaces:
+.RS
+.EX
+mpmtr \-\-hop\-info "snmp /etc/mpmtr/snmp.conf" example.com
+.EE
+.RE
+.PP
+With descriptions and errors, refreshed every minute:
+.RS
+.EX
+mpmtr \-\-hop\-info "snmp \-\-descr \-\-errors /etc/mpmtr/snmp.conf" \e
+      \-\-hop\-info\-interval 60s example.com
+.EE
+.RE
+.PP
+Together with another plugin (their notes stand side by side):
+.RS
+.EX
+mpmtr \-\-hop\-info "snmp /etc/mpmtr/snmp.conf" \-\-hop\-info rack example.com
+.EE
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+.B mpmtr
+closed the plugin's input.
+.TP
+.B 1
+The configuration file cannot be read, is readable by others, or has an
+error.
+.TP
+.B 2
+Wrong command line.
+.SH FILES
+.B mpmtr
+looks for the executable
+.B mpmtr\-hop\-snmp
+next to itself, then in
+.BR PATH .
+.SH SECURITY
+.IP \(bu 2
+An SNMPv2c community travels in clear text to every address the file
+allows.
+Keep the prefixes as narrow as your own network.
+.IP \(bu 2
+A prefix that covers addresses you do not control hands them the
+community: whoever answers from such an address on the path gets a request
+with it.
+.IP \(bu 2
+.B mpmtr
+itself sends nothing for this and has no SNMP options: the credentials live
+only in the file.
+.IP \(bu 2
+The plugin only reads (GET); it never writes to a device.
+.SH SEE ALSO
+.BR mpmtr (1),
+.BR mpmtr\-app\-http (1),
+.BR snmpget (1)
+.PP
+IF-MIB (RFC 2863), IP-MIB (RFC 4293), EtherLike-MIB (RFC 3635).
+.PP
+.B docs/PLUGINS.md
+(the plugin protocol),
+.B docs/WRITING_PLUGINS.md
+(how to write a plugin).
+.SH LICENSE
+MIT.

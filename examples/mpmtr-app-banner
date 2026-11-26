@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Application-check plugin for mpmtr without the Go SDK: the server must
+greet with a line that starts with the given text.
+
+    mpmtr --app "banner SSH-2.0" example.com:22
+
+Messages are JSON objects, one per packet, on the unix SOCK_SEQPACKET socket
+that mpmtr leaves on descriptor 3. A check arrives with a connected TCP
+socket attached (SCM_RIGHTS).
+"""
+import json
+import socket
+import sys
+import threading
+import time
+
+lock = threading.Lock()
+
+
+def say(chan, obj):
+    with lock:  # checks run in parallel; one packet per message
+        chan.send(json.dumps(obj).encode())
+
+
+def check(chan, req, conn, want):
+    start = time.monotonic()
+    ok, stage, err = False, "", ""
+    try:
+        conn.settimeout(req["timeout_ms"] / 1000)
+        line = conn.makefile("rb").readline().decode("latin-1").strip()
+        if line.startswith(want):
+            ok = True
+        else:
+            stage, err = "banner", "got %r" % line[:40]  # the server's fault
+    except socket.timeout:
+        stage, err = "banner", "no greeting in time"  # the server's fault
+    except OSError as e:
+        stage, err = "banner", str(e)
+    finally:
+        conn.close()  # our copy goes first; mpmtr closes the last one (RST)
+    say(chan, {"type": "result", "id": req["id"], "ok": ok, "stage": stage, "error": err,
+               "ms": (time.monotonic() - start) * 1000})
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit('usage: mpmtr --app "banner TEXT"')
+    want = sys.argv[1]
+    chan = socket.socket(fileno=3)
+    say(chan, {"type": "hello", "name": "banner", "version": "1"})
+    while True:
+        data, fds, _, _ = socket.recv_fds(chan, 65536, 4)
+        if not data:
+            return  # mpmtr is gone
+        conns = [socket.socket(fileno=fd) for fd in fds]
+        try:
+            req = json.loads(data)
+        except ValueError:
+            req = {}
+        if req.get("type") != "check" or not conns:
+            for c in conns:
+                c.close()  # never keep a socket that will not be used
+            continue
+        for c in conns[1:]:
+            c.close()
+        threading.Thread(target=check, args=(chan, req, conns[0], want), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,142 @@
+.\" -*- coding: UTF-8 -*-
+.\" mpmtr-app-http(1). Keep in sync with cmd/mpmtr-app-http/main.go.
+.TH MPMTR\-APP\-HTTP 1 "November 2026" "mpmtr" "User Commands"
+.SH NAME
+mpmtr\-app\-http \- application-check plugin for mpmtr: does the server answer HTTP
+.SH SYNOPSIS
+.B mpmtr \-\-app http
+.RI [ options ]
+.IR target [: port ]
+.SH DESCRIPTION
+.B mpmtr\-app\-http
+is a plugin of
+.BR mpmtr (1).
+It is not run by hand:
+.B mpmtr \-\-app http
+starts it and hands it connections.
+It has no options of its own.
+.PP
+.B mpmtr
+measures with bare TCP SYN packets, which tell only that a server accepts
+connections.
+With this plugin every measured source port also gets, every
+.B \-\-app\-interval
+(default 10 s), one real HTTP request to the server that port leads to.
+A server that accepts connections and does not answer HTTP is then seen as
+such: its checks fail while TCP answers, and after three failed checks in a
+row it is DOWN.
+.SH WHAT ONE CHECK DOES
+.IP 1. 4
+.B mpmtr
+opens a kernel TCP connection from the measured source port to the target:
+the same addresses and ports its probes use, so a load balancer leads the
+connection to the same server.
+.IP 2. 4
+The plugin gets the connected socket and sends
+.RS 4
+.PP
+.EX
+HEAD / HTTP/1.0
+Host: \fIaddress of the target\fP
+User\-Agent: mpmtr
+.EE
+.RE
+.IP 3. 4
+It reads one line of the answer.
+A line that starts with
+.B HTTP/
+is a passed check, whatever the status code.
+.IP 4. 4
+.B mpmtr
+closes the connection with RST.
+.PP
+The whole check must fit in
+.B \-\-app\-timeout
+(default 5 s).
+.SH RESULTS
+.TP
+passed
+The server sent an HTTP status line.
+Counts as an answer of that port and server; its RTT is the time of the TCP
+handshake of this connection.
+.TP
+.RB "failed, stage " send
+The request could not be written (the server reset the connection).
+.TP
+.RB "failed, stage " answer
+No line came before the timeout, the server closed the connection without
+one, or the line is not an HTTP status line.
+.PP
+The checks are counted apart from the TCP probes: a failed one is shown as
+.BI app\-failed: N / M
+in the flags and as
+.BR app_failed " of " app_checks
+in JSON, with a rate of its own, and is not part of the TCP failure share.
+Three failed checks in a row make the port DOWN, reason
+.BR app_down .
+A connection that was refused or never established is counted by
+.B mpmtr
+itself, before the plugin sees anything.
+.PP
+To see every check with its stage and error text, set
+.B MPMTR_DEBUG_APP=1
+and read standard error.
+.SH WHAT IT DOES NOT CHECK
+.IP \(bu 2
+The status code.
+404, 500 and a redirect all pass: the check answers "is an HTTP server
+alive here", not "does the site work".
+.IP \(bu 2
+Virtual hosts.
+The
+.B Host
+header carries the target's address, not the name you gave on the command
+line, so a server sees a request for an unknown site.
+.IP \(bu 2
+TLS.
+The request is plain text.
+On a TLS port (443) the outcome depends on the server: some answer a
+plain-text request with an HTTP error line (the check passes), some close
+the connection (the check fails).
+Use it on plain HTTP ports.
+.PP
+A check of your own protocol is a small program: see
+.B docs/WRITING_PLUGINS.md
+in the source tree.
+.SH EXAMPLES
+Every route to a web server, each measured port checked over HTTP:
+.RS
+.EX
+mpmtr \-\-app http example.com:80
+.EE
+.RE
+.PP
+Every server behind an anycast address, checked every 30 s:
+.RS
+.EX
+mpmtr \-\-anycast \-\-app http \-\-app\-interval 30s example.com:80
+.EE
+.RE
+.SH FILES
+.B mpmtr
+looks for the executable
+.B mpmtr\-app\-http
+next to itself, then in
+.BR PATH .
+.SH SECURITY
+The plugin runs with the privileges
+.B mpmtr
+has.
+It sends nothing but the request above, and only over connections
+.B mpmtr
+gave it.
+.SH SEE ALSO
+.BR mpmtr (1),
+.BR mpmtr\-hop\-snmp (1)
+.PP
+.B docs/PLUGINS.md
+(the plugin protocol),
+.B docs/WRITING_PLUGINS.md
+(how to write a plugin).
+.SH LICENSE
+MIT.
