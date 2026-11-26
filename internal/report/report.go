@@ -993,18 +993,14 @@ func EndpointHeader(w io.Writer, e core.EPSnap) {
 		e.W5.Valid, e.W5.Timeout, Pct(e.W5.TimeoutRate), e.W5.Unreach, Pct(e.W5.FailureRate), CI(e.W5), appChecks(e.W5, "  "),
 		a.Loss+a.Down, a.Total-a.Invalid, dash(a.WorstFlow), pctv(a.WorstFailure, a.WorstFlow != ""), a.FullyDown, a.RTTDegraded)
 	d := e.Discovery
-	gm := "UNKNOWN"
-	if d.SingletonMassOK {
-		gm = fmt.Sprintf("%.3f", d.SingletonMass)
-	}
 	stop := string(d.Reason)
 	if d.Running {
 		stop = "running"
 	} else if stop == "" {
 		stop = "off"
 	}
-	fmt.Fprintf(w, "  discovery: %s  explored %d (+%d in progress)  branches %d  batches %d (no new %d)  singleton-mass %s\n",
-		stop, d.Explored, d.InProgress, d.Branches, d.Batches, d.BatchesWithoutNew, gm)
+	fmt.Fprintf(w, "  discovery: %s  explored %d (+%d in progress)  branches %d  batches %d (no new %d)\n",
+		stop, d.Explored, d.InProgress, d.Branches, d.Batches, d.BatchesWithoutNew)
 	switch {
 	case e.Coverage.Incomplete:
 		fmt.Fprintf(w, "  COVERAGE INCOMPLETE: %d distinct groups, only %d have monitored flows (%d with fewer than 2)\n",

@@ -24,8 +24,6 @@ type discovery struct {
 	lastBranches int
 	stopped      bool
 	reason       StopReason
-	gt           float64
-	gtOK         bool
 	started      Mono
 	stoppedAt    Mono
 	candidates   int
@@ -41,8 +39,6 @@ type DiscoveryStatus struct {
 	Batches           int        `json:"batches"`
 	BatchesWithoutNew int        `json:"batches_without_new"`
 	Branches          int        `json:"branches"`
-	SingletonMass     float64    `json:"singleton_mass"`
-	SingletonMassOK   bool       `json:"singleton_mass_ok"`
 	Stopped           bool       `json:"stopped"`
 	Reason            StopReason `json:"reason"`
 	Running           bool       `json:"running"`
@@ -120,31 +116,6 @@ func (c *Core) discCandidateDone(f *Flow) {
 	c.discProgress(ep)
 }
 
-// singletonMass returns the Good–Turing f1/n over confirmed signatures,
-// and whether the estimate is applicable at all.
-func singletonMass(ep *Endpoint) (float64, bool) {
-	n, f1, other := 0, 0, 0
-	for _, f := range ep.Flows {
-		switch f.level {
-		case LevelConfirmed:
-			n++
-		case LevelAmbiguous, LevelUnresolved, LevelTentative:
-			if f.sig.known > 0 || f.sig.distKnown {
-				other++
-			}
-		}
-	}
-	for _, g := range ep.groups {
-		if g.Level == LevelConfirmed && len(g.Members) == 1 {
-			f1++
-		}
-	}
-	if n < 20 || other*5 > n+other {
-		return 0, false
-	}
-	return float64(f1) / float64(n), true
-}
-
 // resolvable returns flows whose ambiguity more probes could still resolve.
 func (c *Core) resolvable(ep *Endpoint) []*Flow {
 	var out []*Flow
@@ -178,7 +149,6 @@ func (c *Core) discProgress(ep *Endpoint) {
 	}
 	d.noNew = d.sinceNew
 	d.batches = d.explored
-	d.gt, d.gtOK = singletonMass(ep)
 	c.assignMonitors(ep) // new routes are measured right away
 
 	// Stop when new ports keep landing on known routes: no new route among
@@ -272,6 +242,6 @@ func (ep *Endpoint) discoveryStatus(enabled bool) DiscoveryStatus {
 	d := &ep.disc
 	return DiscoveryStatus{Ports: d.ports, Explored: d.explored, InProgress: d.inBatch, Candidates: d.candidates,
 		Batches: d.batches, BatchesWithoutNew: d.noNew, Branches: ep.branches(),
-		SingletonMass: d.gt, SingletonMassOK: d.gtOK, Stopped: d.stopped, Reason: d.reason,
+		Stopped: d.stopped, Reason: d.reason,
 		Running: enabled && !d.stopped}
 }

@@ -9,7 +9,7 @@ How routes are found and grouped, what happens when they change, and how a failu
 Discovery runs alongside E2E monitoring as a pipeline: up to 32 ports are
 traced at a time, and every finished port immediately updates the routes
 and the stop rule and is replaced by the next port of the range (at most
-the whole range, 256).
+the whole `--sport-range`, 256 ports by default).
 
 A trace is one pass. Once a path length is known — the shortest one of the
 ports traced so far, or an estimate from the TTL of the destination's reply
@@ -85,7 +85,12 @@ Levels:
   explored ports and no resolvable ambiguity. With k equally likely routes
   the chance that a given one of them got none of those ports is about
   (1−1/k)^(8k) ≈ 0.03 %; a route that gets a smaller share of the ports than
-  the others is missed more easily.
+  the others is missed more easily: one that gets 1/64 of them next to 11
+  equal routes is missed about 15 % of the time. The rule cannot tell such a
+  route is there, and no estimate from the routes found can either: a route
+  that no port reached leaves no trace in them. A wider `--sport-range`
+  helps only where discovery runs out of ports before the rule stops it
+  (`budget_exhausted`).
 * **`max_flows`**.
 * **`budget_exhausted`** — no more ports.
 * **`deadline`**.
