@@ -135,7 +135,8 @@ OTHER
 INTERACTIVE KEYS
   q quit · p pause screen (measuring continues) · r reset statistics ·
   d next view (route tree / flow table / one flow / servers with --anycast) ·
-  s ← → sort the flow table · f focus: trace the open flow every interval ·
+  s ← → sort the flow table or the servers ·
+  f focus: trace the open flow every interval ·
   ↑↓ j k select · PgUp PgDn scroll · Enter open or fold · Esc back ·
   - + fold / unfold the tree · * one line per route · Tab n next endpoint ·
   Ctrl-L redraw · ? h help

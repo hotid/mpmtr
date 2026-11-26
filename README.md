@@ -265,8 +265,8 @@ TTL   HOST                                      Loss%  Snt    Last     Med     P
   * **`d`** — switches tree / flow table / single flow / servers (with
     `--anycast`).
   * **`↑` `↓` `PgUp` `PgDn`** — scroll and select.
-  * **`←` `→`**, **`s`** — in the flow table: sort by the previous / next
-    column.
+  * **`←` `→`**, **`s`** — in the flow table and the server list: sort by
+    the previous / next column.
   * **`f`** — in the single-flow view: turns on focus. That port's whole
     route is traced every interval, so its hop rows are fresh, while the hop
     refresh of the other ports waits.

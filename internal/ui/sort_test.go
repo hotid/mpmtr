@@ -117,3 +117,61 @@ func TestEscFromFlow(t *testing.T) {
 		t.Errorf("Esc with the help open: view %s help %v", viewNames[u.view], u.help)
 	}
 }
+
+// The server list sorts by its columns as the flow table does: s and the
+// arrows move to the next or previous one, the selected server stays
+// selected, numbers sort largest first and STATE worst first; by default
+// the servers stand in their number order (S2 before S10).
+func TestSortServers(t *testing.T) {
+	srv := func(name string, loss *float64, med uint32, st core.RowState) core.ServerSnap {
+		return core.ServerSnap{Name: name, State: st, E2E: core.HopSnap{Loss: loss, Median: med}}
+	}
+	e := core.EPSnap{Anycast: &core.AnycastSnap{Servers: []core.ServerSnap{
+		srv("S10", rate(0.02), 150000, core.RowLoss),
+		srv("S2", rate(0), 180000, core.RowOK),
+		srv("S3", nil, 0, core.RowWarmup),
+		srv("S1", rate(0.5), 160000, core.RowDown),
+	}}}
+	u := &UI{view: viewServers, last: &core.Snapshot{Endpoints: []core.EPSnap{e}}, folded: map[string]bool{}, backTo: -1}
+	order := func() string {
+		var n []string
+		for _, s := range u.serverList() {
+			n = append(n, s.Name)
+		}
+		return strings.Join(n, " ")
+	}
+	at := func(name string) int {
+		for i, c := range srvCols {
+			if c.name == name {
+				return i
+			}
+		}
+		t.Fatalf("no column %s", name)
+		return 0
+	}
+	for name, want := range map[string]string{"SERVER": "S1 S2 S3 S10", "Loss%": "S1 S10 S2 S3", "Med": "S2 S1 S10 S3", "STATE": "S1 S10 S3 S2"} {
+		u.srvSort = at(name)
+		if got := order(); got != want {
+			t.Errorf("by %s: %s, want %s", name, got, want)
+		}
+	}
+	// every column but STATE is a word of the list's header
+	for _, c := range srvCols {
+		if c.name != "STATE" && !strings.Contains(markCol(report.ServerHeader, c.name), "\x1b[0;7m"+c.name) {
+			t.Errorf("column %q is not a word of the server header", c.name)
+		}
+	}
+	u.srvSort, u.srvSel = 0, 3 // S10
+	u.key([]byte("s"))
+	if srvCols[u.srvSort].name != "Loss%" || u.serverList()[u.srvSel].Name != "S10" {
+		t.Errorf("s: column %s, selected %s", srvCols[u.srvSort].name, u.serverList()[u.srvSel].Name)
+	}
+	u.key([]byte("\x1b[D"))
+	u.key([]byte("\x1b[D"))
+	if srvCols[u.srvSort].name != "STATE" || u.serverList()[u.srvSel].Name != "S10" {
+		t.Errorf("left twice wraps to the last column: %s, selected %s", srvCols[u.srvSort].name, u.serverList()[u.srvSel].Name)
+	}
+	if u.sortBy != 0 {
+		t.Error("sorting the servers changed the flow table's order")
+	}
+}

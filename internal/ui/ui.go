@@ -33,6 +33,59 @@ const (
 
 var viewNames = []string{"tree", "servers", "flows", "flow"}
 
+// srvCols are the columns of the server list that it can be sorted by, in
+// screen order, named as in its header (STATE stands in the tag after the
+// numbers). Numbers sort largest first, a row without the number last;
+// ties keep the server order.
+var srvCols = []struct {
+	name string
+	less func(a, b core.ServerSnap) bool
+}{
+	{"SERVER", func(a, b core.ServerSnap) bool { return serverNum(a.Name) < serverNum(b.Name) }},
+	{"Loss%", func(a, b core.ServerSnap) bool {
+		x, y := a.E2E.Loss, b.E2E.Loss
+		if (x == nil) != (y == nil) {
+			return y == nil
+		}
+		return x != nil && *x > *y
+	}},
+	{"Snt", func(a, b core.ServerSnap) bool { return a.E2E.Sent > b.E2E.Sent }},
+	{"Last", func(a, b core.ServerSnap) bool { return a.E2E.Last > b.E2E.Last }},
+	{"Med", func(a, b core.ServerSnap) bool { return a.E2E.Median > b.E2E.Median }},
+	{"P95", func(a, b core.ServerSnap) bool { return a.E2E.P95 > b.E2E.P95 }},
+	{"Best", func(a, b core.ServerSnap) bool { return a.E2E.Min > b.E2E.Min }},
+	{"Wrst", func(a, b core.ServerSnap) bool { return a.E2E.Max > b.E2E.Max }},
+	{"Jttr", func(a, b core.ServerSnap) bool { return a.E2E.Jitter > b.E2E.Jitter }},
+	{"STATE", func(a, b core.ServerSnap) bool { return rowRank(a.State) < rowRank(b.State) }},
+}
+
+// markCol shows which column of a (dimmed) header the list is sorted by.
+// The name is matched as a whole word: "P95" is not found inside another.
+func markCol(head, col string) string {
+	for i := 0; i+len(col) <= len(head); i++ {
+		if head[i:i+len(col)] == col && (i == 0 || head[i-1] == ' ') && (i+len(col) == len(head) || head[i+len(col)] == ' ') {
+			return head[:i] + "\x1b[0;7m" + col + "\x1b[0;2m" + head[i+len(col):]
+		}
+	}
+	return head
+}
+
+// rowRank orders row states worst first.
+func rowRank(s core.RowState) int {
+	return [...]int{core.RowDown: 0, core.RowLoss: 1, core.RowUnknown: 2, core.RowWarmup: 3, core.RowOK: 4, core.RowNotMeasured: 5, core.RowNone: 6}[s]
+}
+
+// serverNum is the number of a server name ("S12" → 12).
+func serverNum(n string) int {
+	v := 0
+	for _, ch := range n {
+		if ch >= '0' && ch <= '9' {
+			v = v*10 + int(ch-'0')
+		}
+	}
+	return v
+}
+
 // sortCols are the columns of the flow table that it can be sorted by, in
 // screen order, named as in its header. Numbers sort largest first; ties
 // keep source-port order.
@@ -104,6 +157,7 @@ type UI struct {
 	ep      core.EndpointID
 	sel     int
 	sortBy  int
+	srvSort int // column of the server list it is sorted by
 	paused  bool
 	help    bool
 	last    *core.Snapshot
@@ -419,6 +473,22 @@ func (u *UI) key(k []byte) (quit bool) {
 			u.view++
 		}
 		u.scroll, u.backTo = 0, -1
+	case u.view == viewServers && (s == "s" || s == "\x1b[C" || s == "\x1b[D"):
+		step := 1
+		if s == "\x1b[D" {
+			step = len(srvCols) - 1
+		}
+		keep := "" // the selected server stays selected
+		if sv := u.serverList(); u.srvSel < len(sv) {
+			keep = sv[u.srvSel].Name
+		}
+		u.srvSort = (u.srvSort + step) % len(srvCols)
+		for i, sv := range u.serverList() {
+			if sv.Name == keep {
+				u.srvSel = i
+			}
+		}
+		u.flash("servers sorted by " + srvCols[u.srvSort].name)
 	case s == "s" || (u.view == viewFlows && (s == "\x1b[C" || s == "\x1b[D")):
 		step := 1
 		if s == "\x1b[D" {
@@ -771,7 +841,11 @@ func (u *UI) render(s *core.Snapshot) {
 		if u.srvSel >= len(sv) {
 			u.srvSel = max(0, len(sv)-1)
 		}
-		add(&body, "\x1b[2m%s\x1b[0m", report.ServerHeaderFor(names))
+		head := report.ServerHeaderFor(names)
+		if col := srvCols[u.srvSort%len(srvCols)].name; col != "STATE" { // STATE has no header of its own
+			head = markCol(head, col)
+		}
+		add(&body, "\x1b[2m%s\x1b[0m", head)
 		u.srvLine = len(body)
 		for i, sv := range sv {
 			pre := ""
@@ -782,11 +856,11 @@ func (u *UI) render(s *core.Snapshot) {
 			line := pre + color(sv.State)
 			add(&body, "%s%s%s", line, report.ServerLine(sv, routeNames(rn, sv.Groups), names, cellStyle(sv.E2E, reset+line)), reset)
 		}
-		add(&body, "\x1b[2m  ↑↓ select · Enter: the route to the server (its measured port) · Esc there returns here\x1b[0m")
+		add(&body, "\x1b[2m  ↑↓ select · ← → s sort (now: %s) · Enter: the route to the server (its measured port) · Esc there returns here\x1b[0m", srvCols[u.srvSort%len(srvCols)].name)
 	case viewFlows:
 		// the column the table is sorted by stands out in the header
 		col := sortCols[u.sortBy%len(sortCols)].name
-		add(&body, "\x1b[2m%s\x1b[0m", strings.Replace(report.FlowHeader, col, "\x1b[0;7m"+col+"\x1b[0;2m", 1))
+		add(&body, "\x1b[2m%s\x1b[0m", markCol(report.FlowHeader, col))
 		for i, f := range flows {
 			pre := ""
 			if i == u.sel {
@@ -968,6 +1042,11 @@ var helpText = []string{
 	"  Flow table",
 	"  ↑ ↓  j k       select a flow;  Enter  open it (Esc or Enter returns)",
 	"  ← →  s         sort by the previous / next column; the header marks it; numbers largest first",
+	"",
+	"  Servers (--anycast)",
+	"  ↑ ↓  j k       select a server;  Enter  open the flow of its measured port (Esc returns)",
+	"  ← →  s         sort by the previous / next column (Loss%, Snt, Last … Jttr, STATE); numbers",
+	"                 largest first, STATE worst first",
 	"",
 	"  One flow",
 	"  ↑ ↓            the previous / next flow",
@@ -1211,16 +1290,10 @@ func (u *UI) serverList() []core.ServerSnap {
 		return nil
 	}
 	sv := append([]core.ServerSnap(nil), u.last.Endpoints[u.ep].Anycast.Servers...)
-	num := func(n string) int {
-		v := 0
-		for _, ch := range n {
-			if ch >= '0' && ch <= '9' {
-				v = v*10 + int(ch-'0')
-			}
-		}
-		return v
+	slices.SortStableFunc(sv, func(a, b core.ServerSnap) int { return serverNum(a.Name) - serverNum(b.Name) })
+	if less := srvCols[u.srvSort%len(srvCols)].less; u.srvSort != 0 {
+		sort.SliceStable(sv, func(i, j int) bool { return less(sv[i], sv[j]) })
 	}
-	slices.SortFunc(sv, func(a, b core.ServerSnap) int { return num(a.Name) - num(b.Name) })
 	return sv
 }
 
