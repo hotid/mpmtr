@@ -171,7 +171,8 @@ ancillary data (`SCM_RIGHTS`).
 ```
 plugin → mpmtr  {"type":"hello","name":"banner","version":"1"}
 mpmtr → plugin  {"type":"check","id":7,"src":"192.0.2.1","sport":20031,
-                 "dst":"192.0.2.10","dport":443,"server":"S7","timeout_ms":5000}
+                 "dst":"192.0.2.10","dport":443,"server":"S7",
+                 "host":"example.com","timeout_ms":5000}
                  + the connected TCP socket
 plugin → mpmtr  {"type":"result","id":7,"ok":false,"stage":"handshake",
                  "error":"eof","ms":12.5}
@@ -179,8 +180,13 @@ plugin → mpmtr  {"type":"result","id":7,"ok":false,"stage":"handshake",
 
 - `server` is mpmtr's name of the server behind the address (`--anycast`),
   empty otherwise.
+- `host` is the target as typed on mpmtr's command line, without the port (a
+  name or an address); `Request.Host` in the SDK.
 - `timeout_ms` is what is left of `--app-timeout` after the connect.
 - `ms` is how long your part took; informational.
+- `note` in the result is optional: a few characters about the answer (at
+  most 24), shown in the `PLUGIN` column of the server's row. In the SDK it
+  is `Result.Note`.
 
 ### The verdict
 
@@ -235,7 +241,7 @@ import (
 
 func main() {
 	err := plugin.Serve("http", "1", func(ctx context.Context, c net.Conn, req plugin.Request) plugin.Result {
-		if _, err := fmt.Fprintf(c, "HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n", req.Dst.Addr()); err != nil {
+		if _, err := fmt.Fprintf(c, "HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n", req.Host); err != nil {
 			return plugin.Result{Stage: "send", Err: err}
 		}
 		line, err := bufio.NewReader(c).ReadString('\n')

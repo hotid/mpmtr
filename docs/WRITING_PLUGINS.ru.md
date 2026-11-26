@@ -174,7 +174,8 @@ JSON в одном пакете. `check` несёт подключённый TCP
 ```
 плагин → mpmtr  {"type":"hello","name":"banner","version":"1"}
 mpmtr → плагин  {"type":"check","id":7,"src":"192.0.2.1","sport":20031,
-                 "dst":"192.0.2.10","dport":443,"server":"S7","timeout_ms":5000}
+                 "dst":"192.0.2.10","dport":443,"server":"S7",
+                 "host":"example.com","timeout_ms":5000}
                  + подключённый TCP-сокет
 плагин → mpmtr  {"type":"result","id":7,"ok":false,"stage":"handshake",
                  "error":"eof","ms":12.5}
@@ -182,8 +183,13 @@ mpmtr → плагин  {"type":"check","id":7,"src":"192.0.2.1","sport":20031,
 
 - `server` — имя сервера за адресом по версии mpmtr (`--anycast`), иначе
   пусто.
+- `host` — цель, как она набрана в командной строке mpmtr, без порта (имя
+  или адрес); в SDK это `Request.Host`.
 - `timeout_ms` — сколько осталось от `--app-timeout` после соединения.
 - `ms` — сколько заняла ваша часть; только для сведения.
+- `note` в результате необязателен: несколько символов об ответе (не больше
+  24), показываются в колонке `PLUGIN` строки сервера. В SDK это
+  `Result.Note`.
 
 ### Вердикт
 
@@ -240,7 +246,7 @@ import (
 
 func main() {
 	err := plugin.Serve("http", "1", func(ctx context.Context, c net.Conn, req plugin.Request) plugin.Result {
-		if _, err := fmt.Fprintf(c, "HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n", req.Dst.Addr()); err != nil {
+		if _, err := fmt.Fprintf(c, "HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n", req.Host); err != nil {
 			return plugin.Result{Stage: "send", Err: err}
 		}
 		line, err := bufio.NewReader(c).ReadString('\n')

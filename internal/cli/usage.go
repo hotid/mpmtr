@@ -88,7 +88,8 @@ SERVERS AND APPLICATIONS
                           own source port, the plugin speaks the protocol.
                           Counted apart from the TCP probes; three failed
                           checks in a row make the server DOWN
-                          (docs/PLUGINS.md; example: --app http)
+                          (docs/PLUGINS.md; example: --app http, which
+                          also shows the HTTP status in the PLUGIN column)
       --app-interval D    per measured port (default 10s)
       --app-timeout D     (default 5s)
 

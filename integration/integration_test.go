@@ -793,7 +793,7 @@ func TestIPv6FlowLabel(t *testing.T) {
 		{nil, ""},
 	} {
 		d := startDump(t, "mpr0", "r0s", "ip6 and tcp dst port 443")
-		args := append([]string{"-r", "-c", "60", "--json", "--app", "http", "--app-interval", "1s", "--app-timeout", "500ms"}, tc.args...)
+		args := append([]string{"-r", "-c", "60", "--json", "--app", "http --plain", "--app-interval", "1s", "--app-timeout", "500ms"}, tc.args...)
 		r := mpmtr(t, append(append(args, "[fd20::2]:443"), fast...)...)
 		out := d.stop()
 		checks := uint64(0)

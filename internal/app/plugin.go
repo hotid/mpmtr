@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -38,14 +39,19 @@ type pluginMsg struct {
 	Dst     string  `json:"dst,omitempty"`
 	DPort   uint16  `json:"dport,omitempty"`
 	Server  string  `json:"server,omitempty"`
+	Host    string  `json:"host,omitempty"`
 	Timeout int64   `json:"timeout_ms,omitempty"`
 	OK      bool    `json:"ok,omitempty"`
 	Stage   string  `json:"stage,omitempty"`
 	Error   string  `json:"error,omitempty"`
+	Note    string  `json:"note,omitempty"`
 	Ms      float64 `json:"ms,omitempty"`
 }
 
 // Plugin is a running application-check plugin.
+// appNoteMax is the longest note of a check that is shown.
+const appNoteMax = 24
+
 type Plugin struct {
 	Name, Version string
 	cmd           *exec.Cmd
@@ -53,7 +59,8 @@ type Plugin struct {
 	mu            sync.Mutex
 	wait          map[uint64]chan pluginMsg
 	dead          error
-	silent        int // checks in a row the plugin gave no result for
+	silent        int          // checks in a row the plugin gave no result for
+	noteW         atomic.Int32 // widest note a result carried
 	errTail       *tail
 }
 
@@ -189,6 +196,9 @@ func (p *Plugin) fail(err error) {
 	}
 }
 
+// NoteWidth is the width of the widest note the plugin gave (0 = none yet).
+func (p *Plugin) NoteWidth() int { return int(p.noteW.Load()) }
+
 // Dead reports why the plugin stopped working (nil while it runs).
 func (p *Plugin) Dead() error {
 	p.mu.Lock()
@@ -199,13 +209,13 @@ func (p *Plugin) Dead() error {
 // Check hands the connected socket to the plugin and waits for its
 // verdict: passed, failed, or the plugin itself failed (not the server's
 // fault). This is the one place where the plugin's stage "plugin" is read.
-func (p *Plugin) Check(id uint64, conn int, m pluginMsg, timeout time.Duration) (out core.AppOutcome, stage, errText string, appTime time.Duration) {
+func (p *Plugin) Check(id uint64, conn int, m pluginMsg, timeout time.Duration) (out core.AppOutcome, stage, errText, note string, appTime time.Duration) {
 	ch := make(chan pluginMsg, 1)
 	p.mu.Lock()
 	if p.dead != nil {
 		err := p.dead
 		p.mu.Unlock()
-		return core.AppPluginFailed, core.StagePlugin, err.Error(), 0
+		return core.AppPluginFailed, core.StagePlugin, err.Error(), "", 0
 	}
 	p.wait[id] = ch
 	p.mu.Unlock()
@@ -216,19 +226,22 @@ func (p *Plugin) Check(id uint64, conn int, m pluginMsg, timeout time.Duration) 
 		p.mu.Lock()
 		delete(p.wait, id)
 		p.mu.Unlock()
-		return core.AppPluginFailed, core.StagePlugin, err.Error(), 0
+		return core.AppPluginFailed, core.StagePlugin, err.Error(), "", 0
 	}
 	select {
 	case r := <-ch:
 		// The plugin's words go to a terminal, and may quote the server's.
-		r.Stage, r.Error = clean(r.Stage, 32), clean(r.Error, 200)
+		r.Stage, r.Error, r.Note = clean(r.Stage, 32), clean(r.Error, 200), clean(r.Note, appNoteMax)
+		if n := int32(len([]rune(r.Note))); n > p.noteW.Load() {
+			p.noteW.Store(n)
+		}
 		switch {
 		case r.OK:
-			return core.AppPassed, r.Stage, r.Error, time.Since(start)
+			return core.AppPassed, r.Stage, r.Error, r.Note, time.Since(start)
 		case r.Stage == core.StagePlugin:
-			return core.AppPluginFailed, r.Stage, r.Error, time.Since(start)
+			return core.AppPluginFailed, r.Stage, r.Error, "", time.Since(start)
 		}
-		return core.AppFailed, r.Stage, r.Error, time.Since(start)
+		return core.AppFailed, r.Stage, r.Error, r.Note, time.Since(start)
 	case <-time.After(timeout + pluginGrace):
 		p.mu.Lock()
 		delete(p.wait, id)
@@ -239,7 +252,7 @@ func (p *Plugin) Check(id uint64, conn int, m pluginMsg, timeout time.Duration) 
 			p.fail(fmt.Errorf("plugin stopped: no answer to %d checks in a row", pluginSilentMax))
 			p.cmd.Process.Kill()
 		}
-		return core.AppPluginFailed, core.StagePlugin, "no answer from the plugin", time.Since(start)
+		return core.AppPluginFailed, core.StagePlugin, "no answer from the plugin", "", time.Since(start)
 	}
 }
 

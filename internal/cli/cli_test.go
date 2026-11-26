@@ -215,3 +215,17 @@ func TestExitCode(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitArgs(t *testing.T) {
+	for in, want := range map[string][]string{
+		"":                                  nil,
+		"http":                              {"http"},
+		"  http   --get  /x ":               {"http", "--get", "/x"},
+		`http --user-agent 'A B (C; D)' -g`: {"http", "--user-agent", "A B (C; D)", "-g"},
+		`snmp --x "a 'b' c" ''`:             {"snmp", "--x", "a 'b' c", ""},
+	} {
+		if got := splitArgs(in); !slices.Equal(got, want) {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+}

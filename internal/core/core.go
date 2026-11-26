@@ -91,8 +91,11 @@ func (q *fifo) pop() *Flow {
 
 func (q *fifo) pushFront(f *Flow) {
 	if q.size == len(q.buf) {
-		q.push(f) // grow
+		// Grow through push, then take its element back off the tail: the
+		// buffer is twice the size, the queue is what it was.
+		q.push(f)
 		q.size--
+		q.buf[(q.head+q.size)%len(q.buf)] = nil
 	}
 	q.head = (q.head - 1 + len(q.buf)) % len(q.buf)
 	q.buf[q.head] = f
@@ -359,7 +362,7 @@ func (c *Core) newFlow(ep *Endpoint, sport wire.Port) (*Flow, error) {
 	}
 	f := &Flow{ID: FlowID(len(c.flows)), Num: len(ep.Flows) + 1, EP: ep, IfIndex: rt.IfIndex, Gateway: rt.Gateway}
 	f.Tmpl = wire.FlowTemplate{Src: rt.Src, Dst: ep.Addr, SPort: sport, DPort: ep.Port,
-		TOS: tos, FlowLabel: flowLabel, MSS: rt.MSS}
+		TOS: c.cfg.TOS, FlowLabel: c.cfg.FlowLabel, MSS: rt.MSS}
 	if f.Tmpl.MSS == 0 {
 		f.Tmpl.MSS = 1460
 		if ep.Addr.Is6() {
@@ -385,15 +388,6 @@ func (c *Core) newFlow(ep *Endpoint, sport wire.Port) (*Flow, error) {
 	ep.byPort[sport] = f
 	return f, nil
 }
-
-// tos and flowLabel are set once by the CLI before endpoints are added.
-var (
-	tos       uint8
-	flowLabel uint32
-)
-
-// SetIdentity sets the TOS and IPv6 flow label shared by all flows.
-func SetIdentity(t uint8, fl uint32) { tos, flowLabel = t, fl }
 
 func (c *Core) hash64(parts ...uint64) uint64 {
 	h := fnv.New64a()
@@ -522,6 +516,11 @@ func (c *Core) e2eSlot(f *Flow, due Mono) {
 	}
 	// Schedule the next slot first; never accumulate overdue slots.
 	f.slot++
+	// After a long pause of the process the slots it slept through are
+	// stepped over at once, not one by one.
+	if k := int64((c.now-c.epochStart-f.phase)/iv) - 1; k > f.slot {
+		f.slot = k
+	}
 	for c.slotTime(f, f.slot) <= c.now {
 		f.slot++
 	}
@@ -674,6 +673,9 @@ func (c *Core) sendProbe(f *Flow, class Class, ttl TTL, timeout Mono, burst bool
 			continue
 		}
 		break
+	}
+	if d := f.route.distance; d == 0 || ttl >= d {
+		f.noteReached(p.seq) // not a probe that expires on the way
 	}
 	p.ipid = uint16(c.rng.Uint32()%0xfffe) + 1
 	p.sentMono, p.sentRT = c.now, c.nowRT

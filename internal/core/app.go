@@ -76,6 +76,9 @@ func (c *Core) finishApp(p *Probe, r AppResult) {
 	if o != OutAppOK {
 		f.appStage, f.appErr = r.Stage, r.Err
 	}
+	if o != OutLocalError {
+		f.appNote = r.Note // what the server said last; nothing when it did not answer
+	}
 	if r.Outcome.Connected() {
 		// The real handshake is an E2E sample too: its RTT.
 		p.txSeen, p.txIfOK, p.txRT = true, true, p.sentRT // the kernel sent it: no capture-side checks apply

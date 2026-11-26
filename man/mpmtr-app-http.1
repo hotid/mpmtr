@@ -4,7 +4,16 @@
 .SH NAME
 mpmtr\-app\-http \- application-check plugin for mpmtr: does the server answer HTTP
 .SH SYNOPSIS
-.B mpmtr \-\-app http
+.B mpmtr \-\-app
+.RB \(dq http
+.RB [ \-\-tls | \-\-plain ]
+.RB [ \-\-verify ]
+.RB [ \-\-get
+.RI [ URL ]]
+.RB [ \-\-host
+.IR NAME ]
+.RB [ \-\-user\-agent
+.IR TEXT ]\(dq
 .RI [ options ]
 .IR target [: port ]
 .SH DESCRIPTION
@@ -14,7 +23,7 @@ is a plugin of
 It is not run by hand:
 .B mpmtr \-\-app http
 starts it and hands it connections.
-It has no options of its own.
+Its own options go into the quotes after its name.
 .PP
 .B mpmtr
 measures with bare TCP SYN packets, which tell only that a server accepts
@@ -32,12 +41,15 @@ opens a kernel TCP connection from the measured source port to the target:
 the same addresses and ports its probes use, so a load balancer leads the
 connection to the same server.
 .IP 2. 4
-The plugin gets the connected socket and sends
+The plugin gets the connected socket. On port 443 (or with
+.BR \-\-tls )
+it first makes a TLS handshake, with the target's name as the server name.
+Then it sends
 .RS 4
 .PP
 .EX
 HEAD / HTTP/1.0
-Host: \fIaddress of the target\fP
+Host: \fIthe target as given to mpmtr, without the port\fP
 User\-Agent: mpmtr
 .EE
 .RE
@@ -53,12 +65,69 @@ closes the connection with RST.
 The whole check must fit in
 .B \-\-app\-timeout
 (default 5 s).
+.SH OPTIONS
+.TP
+.B \-\-tls
+Speak TLS. Without it TLS is spoken on port 443 only.
+.TP
+.B \-\-plain
+Never speak TLS, also on port 443.
+.TP
+.B \-\-verify
+A certificate that does not verify against the name fails the check (stage
+.BR tls ).
+By default the certificate is not verified: the check asks whether the
+server answers, not whether its certificate is in order.
+.TP
+.BR \-\-get " [\fIURL\fP]"
+Send
+.B GET
+in place of
+.BR HEAD .
+Some servers refuse HEAD or answer it differently (a 418 or 405 where GET
+gets 200). Only the status line is read either way.
+.I URL
+says what to ask for in place of
+.BR / :
+a path
+.RB ( /index.php ),
+or a URL with a host
+.RB ( example.com/index.php ,
+.BR https://example.com/index.php ).
+The host of the URL is then the name asked for (the
+.B Host
+header and the TLS server name), and its scheme says whether TLS is spoken;
+.BR \-\-host ", " \-\-tls " and " \-\-plain
+win over them.
+The connection still goes to the target given to
+.BR mpmtr .
+.TP
+.BI \-\-host " NAME"
+The name for the
+.B Host
+header and the TLS server name, in place of the target given to
+.BR mpmtr .
+.TP
+.BI \-\-user\-agent " TEXT"
+The
+.B User\-Agent
+header (default
+.BR mpmtr ).
+Some sites answer a client they do not take for a browser differently, for
+example with a redirect to another version of the site.
 .SH RESULTS
 .TP
 passed
-The server sent an HTTP status line.
+The server sent an HTTP status line. Its status code is shown in the
+.B PLUGIN
+column of the server's row.
 Counts as an answer of that port and server; its RTT is the time of the TCP
 handshake of this connection.
+.TP
+.RB "failed, stage " tls
+The TLS handshake failed (or, with
+.BR \-\-verify ,
+the certificate did not verify).
 .TP
 .RB "failed, stage " send
 The request could not be written (the server reset the connection).
@@ -87,18 +156,13 @@ The status code.
 404, 500 and a redirect all pass: the check answers "is an HTTP server
 alive here", not "does the site work".
 .IP \(bu 2
-Virtual hosts.
-The
-.B Host
-header carries the target's address, not the name you gave on the command
-line, so a server sees a request for an unknown site.
+The certificate, unless
+.B \-\-verify
+is given.
 .IP \(bu 2
-TLS.
-The request is plain text.
-On a TLS port (443) the outcome depends on the server: some answer a
-plain-text request with an HTTP error line (the check passes), some close
-the connection (the check fails).
-Use it on plain HTTP ports.
+More than one site.
+Every check asks for the target's own name; other sites of the same server
+are not asked.
 .PP
 A check of your own protocol is a small program: see
 .B docs/WRITING_PLUGINS.md

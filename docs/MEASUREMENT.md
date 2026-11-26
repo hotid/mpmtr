@@ -67,6 +67,12 @@ truncated packet or a bad checksum is never matched.
   challenge ACK. A probe without reply while such evidence exists is
   `remote_state_conflict`, a TCP-state artifact of reusing the 4-tuple and
   not network loss; the flow is flagged `MEASUREMENT_IMPAIRED`.
+  Some servers keep such a connection for a minute or more whatever RSTs
+  follow, and answer every SYN of that port with an ACK of the old probe.
+  Each flow remembers the last probes the server answered, so that ACK is
+  recognised however old the probe is. The flow stays impaired while it
+  lasts and measures again afterwards; it is not `MEASUREMENT_INVALID`,
+  which is for packets that answer no probe of ours.
 
 **Timestamps.** RTT = kernel RX timestamp of the reply − kernel timestamp of
 our captured outgoing SYN (same AF_PACKET socket, same clock). This is the

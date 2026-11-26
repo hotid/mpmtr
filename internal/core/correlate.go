@@ -125,6 +125,14 @@ func (c *Core) onTCP(p *wire.Packet) {
 		if explained {
 			return
 		}
+		// The answer to a probe older than the guard window, sent again:
+		// the server still holds that probe's connection.
+		if f.wasReached(ack - 1) {
+			f.C.Duplicate++
+			c.M.Duplicate++
+			f.remoteUntil = c.now + c.guard()
+			return
+		}
 		// Weak match: ACK does not fit, but the active probe is the only
 		// probe that could explain this reply.
 		if a := f.active; a != nil && !c.recentInGuard(f) {
@@ -141,14 +149,17 @@ func (c *Core) onTCP(p *wire.Packet) {
 	}
 	// RST without ACK, bare ACK (challenge ACK), anything else.
 	if p.Flags&wire.ACK != 0 && p.Flags&(wire.SYN|wire.RST) == 0 {
-		hit := false
+		hit := f.wasReached(ack - 1)
 		c.forRecentOrPending(f, ack-1, func(*probeRec) { hit = true })
 		if hit {
-			// RFC 5961 challenge ACK: the remote still holds state for an
-			// earlier probe of this 4-tuple.
+			// The server answers a new SYN with an ACK of an earlier probe
+			// of ours: it still holds that probe's connection (our RST did
+			// not reach it). The port is ours alone; the probe in flight
+			// ends as remote state, not as a packet from somebody else.
 			f.C.ChallengeAck++
 			c.M.ChallengeAck++
 			f.remoteUntil = c.now + c.guard()
+			return
 		}
 	}
 	f.C.Unexpected++

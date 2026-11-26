@@ -55,7 +55,11 @@ the scenarios and the invariants in milliseconds:
   made-up server, a real server with one foreign port,
 * application checks: counted apart from TCP, a dead and a flaky
   application, TCP and the application recovering each on its own,
-* an application plugin that never answers is stopped.
+* an application plugin that never answers is stopped; its note reaches the
+  DST row,
+* a server that keeps the connection of an answered probe for a minute
+  impairs the flow and does not invalidate it; packets that answer no probe
+  still do.
 
 Integration tests (`integration/`, build tag `integration`) use the topology
 in `integration/topo.sh`: `src ═ R0 ═ ECMP R1..R4 ═ RD ─ dst`, L4-hash

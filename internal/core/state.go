@@ -328,8 +328,10 @@ func (c *Core) evalFlow(f *Flow, bn int64) {
 	// Remote TCP state left over from earlier probes (our RST missing or
 	// lost on the way) shows up as challenge ACKs / missing RSTs: the flow's
 	// measurements are impaired, not a network loss.
-	sm.impaired = w1.Impaired > 0 || (f.C.RstMissing > 0 && f.C.RstMissing*4 > f.C.SynAck) ||
-		(f.C.ChallengeAck > 0 && f.C.ChallengeAck*10 > f.C.Valid()) || w1.Impaired > 0
+	// A probe that got no answer while the server held an earlier probe's
+	// connection is in the window's impaired count, so the flow is impaired
+	// while that lasts and no longer.
+	sm.impaired = w1.Impaired > 0 || (f.C.RstMissing > 0 && f.C.RstMissing*4 > f.C.SynAck)
 
 	// The kernel did not send the flow's probes out of the interface chosen
 	// by the per-flow (port-aware) route lookup: identity not honoured.

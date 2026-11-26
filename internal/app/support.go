@@ -69,6 +69,7 @@ type Resolver struct {
 	q       chan netip.Addr
 	Info    *enrich.Enricher // nil = no annotations
 	Hops    *HopInfo         // nil = no hop-information plugins
+	AppW    func() int       // width of the application plugin's notes; nil = no such plugin
 	warns   []string
 }
 
@@ -141,7 +142,20 @@ func (r *Resolver) Note(ip netip.Addr) string { return r.Info.Note(ip) }
 func (r *Resolver) PluginNote(ip netip.Addr) string { return r.Hops.Note(ip) }
 
 // PluginWidth is the width of the plugins' column (0 = no plugins).
-func (r *Resolver) PluginWidth() int { return r.Hops.width() }
+func (r *Resolver) PluginWidth() int {
+	w := r.Hops.width()
+	if r.AppW == nil {
+		return w
+	}
+	a := r.AppW()
+	switch {
+	case a == 0:
+		return w
+	case w == 0:
+		return max(a, len("PLUGIN"))
+	}
+	return w + 1 + a // a DST row may carry both
+}
 
 // Settle waits (at most d) for the lookups already asked for, so that a
 // final report shows the answers.

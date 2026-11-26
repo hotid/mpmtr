@@ -44,6 +44,10 @@ func (h *dheap) Push(x any)        { *h = append(*h, x.(delivery)) }
 func (h *dheap) Pop() any          { o := *h; n := len(o); d := o[n-1]; *h = o[:n-1]; return d }
 
 type simNet struct {
+	// holdOn: while it says so, the server keeps the connection of the
+	// probe it answered and answers later SYNs of the port with an ACK of it.
+	holdOn func(f *Flow, now Mono) bool
+	held   map[*Flow]uint32
 	t      *testing.T
 	now    Mono
 	rtBase int64
@@ -158,6 +162,19 @@ func (s *simNet) Send(f *Flow, seq uint32, ttl uint8, ipid uint16) error {
 				ICMPType: wire.ICMP4Unreach, ICMPCode: 13, InnerSrc: src, InnerDst: dst, InnerSPort: f.Tmpl.SPort,
 				InnerDPort: f.Tmpl.DPort, InnerSeq: seq, HasInnerSeq: true, InnerIPID: ipid, QuoteL4Len: 8})
 			return nil
+		}
+		if s.holdOn != nil && s.holdOn(f, s.now) {
+			if old, ok := s.held[f]; ok {
+				s.deliver(s.now+Mono(p.rtt), wire.Packet{Kind: wire.KindTCP, Src: dst, Dst: src, SPort: f.Tmpl.DPort,
+					DPort: f.Tmpl.SPort, Seq: 12346, Ack: old + 1, Flags: wire.ACK, TTL: uint8(64 - len(p.hops))})
+				return nil
+			}
+			if s.held == nil {
+				s.held = map[*Flow]uint32{}
+			}
+			s.held[f] = seq
+		} else {
+			delete(s.held, f)
 		}
 		at := s.now + Mono(p.rtt)
 		sa := wire.Packet{Kind: wire.KindTCP, Src: dst, Dst: src, SPort: f.Tmpl.DPort, DPort: f.Tmpl.SPort,

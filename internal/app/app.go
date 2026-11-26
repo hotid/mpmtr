@@ -28,6 +28,7 @@ import (
 // Endpoint to measure.
 type Endpoint struct {
 	Target string
+	Host   string // the target without its port, as typed: a name or an address
 	Addr   netip.Addr
 	Port   wire.Port
 }
@@ -79,9 +80,10 @@ type transport struct{ s *sys.Sender }
 // appTransport adds application checks through a plugin.
 type appTransport struct {
 	transport
-	p    *Plugin
-	rt   *Runtime
-	dial sys.DialOpts
+	p     *Plugin
+	rt    *Runtime
+	dial  sys.DialOpts
+	hosts map[netip.AddrPort]string // endpoint → the target as typed, without its port
 }
 
 // AppCheck opens a real connection from the flow's port, hands it to the
@@ -101,12 +103,13 @@ func (t appTransport) AppCheck(f *core.Flow, id uint64, timeout time.Duration) {
 		switch {
 		case err == nil:
 			r.ConnectRTT = rtt
-			m := pluginMsg{Src: src.String(), SPort: uint16(sport), Dst: dst.String(), DPort: uint16(dport), Server: server}
+			m := pluginMsg{Src: src.String(), SPort: uint16(sport), Dst: dst.String(), DPort: uint16(dport), Server: server,
+				Host: t.hosts[netip.AddrPortFrom(dst, uint16(dport))]}
 			// One budget for the whole check: what the connect used is
 			// not given to the plugin again (the core stops waiting at
 			// the timeout plus a margin).
 			left := max(timeout-time.Since(start), 100*time.Millisecond)
-			r.Outcome, r.Stage, r.Err, r.AppTime = t.p.Check(id, fd, m, left)
+			r.Outcome, r.Stage, r.Err, r.Note, r.AppTime = t.p.Check(id, fd, m, left)
 			unix.Close(fd) // the last copy: SO_LINGER 0 sends RST
 		case refused:
 			r.Outcome, r.Stage, r.Err = core.AppRefused, "tcp", "connection refused"
@@ -298,14 +301,19 @@ func Start(o *Options) (*Runtime, error) {
 	}
 	rt.rtr.Src, rt.rtr.Oif, rt.rtr.Mark, rt.rtr.TOS = o.Src, o.Ifindex, uint32(o.Mark), o.TOS
 	rt.res = sys.NewReserver()
-	core.SetIdentity(o.TOS, o.FlowLabel)
+	o.Core.TOS, o.Core.FlowLabel = o.TOS, o.FlowLabel
 	var tr core.Transport = transport{rt.snd}
 	if o.AppPath != "" {
 		if rt.plugin, err = StartPlugin(o.AppPath, o.AppArgs); err != nil {
 			rt.Close()
 			return nil, err
 		}
-		tr = appTransport{transport: transport{rt.snd}, p: rt.plugin, rt: rt,
+		rt.Names.AppW = rt.plugin.NoteWidth
+		hosts := map[netip.AddrPort]string{}
+		for _, e := range o.Endpoints {
+			hosts[netip.AddrPortFrom(e.Addr, uint16(e.Port))] = e.Host
+		}
+		tr = appTransport{transport: transport{rt.snd}, p: rt.plugin, rt: rt, hosts: hosts,
 			dial: sys.DialOpts{Interface: o.Interface, Mark: o.Mark, TOS: o.TOS, FlowLabel: o.FlowLabel}}
 	}
 	rt.C = core.New(o.Core, tr, env{rt.rtr, rt.res}, clock{rt.start})

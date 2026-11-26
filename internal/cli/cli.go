@@ -443,7 +443,7 @@ func Build(f *flags, targets []string, stdout, stderr io.Writer) (*app.Options, 
 			return nil, fmt.Errorf("duplicate endpoint %s", k)
 		}
 		seen[k] = true
-		o.Endpoints = append(o.Endpoints, app.Endpoint{Target: t, Addr: addr, Port: port})
+		o.Endpoints = append(o.Endpoints, app.Endpoint{Target: t, Host: host, Addr: addr, Port: port})
 	}
 	e2eTTL := uint8(64)
 	if f.maxTTL >= 64 {
@@ -455,7 +455,7 @@ func Build(f *flags, targets []string, stdout, stderr io.Writer) (*app.Options, 
 		TraceOnFailure: f.traceOnFailure, QuoteFallback: !f.noQuoteFallback,
 		DiscoverOnly: f.discover, Seed: 1, SharedHops: f.sharedHops, Anycast: f.anycast,
 		App: f.app != "", AppInterval: f.appInterval, AppTimeout: f.appTimeout}
-	if words := strings.Fields(f.app); len(words) > 0 {
+	if words := splitArgs(f.app); len(words) > 0 {
 		// --app "NAME ARGS...": the plugin and its own arguments
 		if o.AppPath, err = app.FindPlugin(words[0]); err != nil {
 			return nil, err
@@ -467,7 +467,7 @@ func Build(f *flags, targets []string, stdout, stderr io.Writer) (*app.Options, 
 	}
 	o.HopInterval = f.hopInfoInterval
 	for _, spec := range f.hopInfo {
-		words := strings.Fields(spec)
+		words := splitArgs(spec)
 		if len(words) == 0 {
 			return nil, errors.New("--hop-info: empty plugin name")
 		}
@@ -863,3 +863,37 @@ type multiFlag []string
 
 func (m *multiFlag) String() string     { return strings.Join(*m, ", ") }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
+
+// splitArgs splits a plugin's "NAME [ARGS]" into words at spaces; a part in
+// single or double quotes is one word (an argument with spaces in it).
+func splitArgs(s string) []string {
+	var out []string
+	var cur strings.Builder
+	var quote rune
+	in := false
+	for _, r := range s {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote, in = r, true
+		case r == ' ' || r == '\t':
+			if in {
+				out = append(out, cur.String())
+				cur.Reset()
+				in = false
+			}
+		default:
+			cur.WriteRune(r)
+			in = true
+		}
+	}
+	if in {
+		out = append(out, cur.String())
+	}
+	return out
+}

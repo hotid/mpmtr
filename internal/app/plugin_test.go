@@ -3,6 +3,7 @@ package app
 import (
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -55,6 +56,7 @@ func TestPluginEndToEnd(t *testing.T) {
 	if err := res.Reserve(lo, sport); err != nil {
 		t.Fatal(err)
 	}
+	lastNote := ""
 	check := func(id uint64, l net.Listener, timeout time.Duration) (bool, string, bool) {
 		dport := wire.Port(l.Addr().(*net.TCPAddr).Port)
 		fd, _, _, err := sys.DialFrom(lo, sport, lo, dport, sys.DialOpts{}, time.Second)
@@ -62,11 +64,17 @@ func TestPluginEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer unix.Close(fd)
-		out, stage, _, _ := p.Check(id, fd, pluginMsg{Dst: "127.0.0.1", DPort: uint16(dport)}, timeout)
+		out, stage, _, note, _ := p.Check(id, fd, pluginMsg{Dst: "127.0.0.1", DPort: uint16(dport)}, timeout)
+		lastNote = note
 		return out == core.AppPassed, stage, out.Local()
 	}
 	if ok, stage, local := check(1, good, 2*time.Second); !ok || local {
 		t.Fatalf("healthy server: ok %v stage %s local %v", ok, stage, local)
+	}
+	// The plugin's note (the HTTP status) comes with the verdict and sets
+	// the width of its column.
+	if lastNote != "200" || p.NoteWidth() != 3 {
+		t.Fatalf("note %q, width %d; want 200 and 3", lastNote, p.NoteWidth())
 	}
 	if ok, stage, local := check(2, mute, 500*time.Millisecond); ok || local || stage != "answer" {
 		t.Fatalf("mute server: ok %v stage %s local %v", ok, stage, local)
@@ -114,7 +122,7 @@ func TestSilentPluginIsStopped(t *testing.T) {
 		}
 		defer unix.Close(fd)
 		start := time.Now()
-		out, _, _, _ := p.Check(id, fd, pluginMsg{Dst: "127.0.0.1", DPort: uint16(dport)}, 50*time.Millisecond)
+		out, _, _, _, _ := p.Check(id, fd, pluginMsg{Dst: "127.0.0.1", DPort: uint16(dport)}, 50*time.Millisecond)
 		return out, time.Since(start)
 	}
 	for id := uint64(1); id <= pluginSilentMax; id++ {
@@ -137,5 +145,68 @@ func TestSilentPluginIsStopped(t *testing.T) {
 	}
 	if out, took := check(9); out != core.AppPluginFailed || took > 40*time.Millisecond {
 		t.Fatalf("check after the stop: %v in %v", out, took)
+	}
+}
+
+// The http plugin speaks TLS when told to and puts the target's name, as
+// mpmtr hands it over, into the TLS server name and the Host header.
+func TestHTTPPluginTLSAndHost(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "mpmtr-app-http")
+	if out, err := exec.Command("go", "build", "-o", bin, "../../cmd/mpmtr-app-http").CombinedOutput(); err != nil {
+		t.Fatalf("build plugin: %v %s", err, out)
+	}
+	type seen struct{ host, sni, method, path string }
+	got := make(chan seen, 4)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s := seen{host: r.Host, method: r.Method, path: r.URL.Path}
+		if r.TLS != nil {
+			s.sni = r.TLS.ServerName
+		}
+		got <- s
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	srv.StartTLS()
+	defer srv.Close()
+	plain := httptest.NewServer(srv.Config.Handler)
+	defer plain.Close()
+	lo := netip.MustParseAddr("127.0.0.1")
+	res := sys.NewReserver()
+	defer res.Close()
+	const sport = 23412
+	if err := res.Reserve(lo, sport); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args []string, l net.Listener, host string) (core.AppOutcome, string, string) {
+		p, err := StartPlugin(bin, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.Close()
+		dport := wire.Port(l.Addr().(*net.TCPAddr).Port)
+		fd, _, _, err := sys.DialFrom(lo, sport, lo, dport, sys.DialOpts{}, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(fd)
+		out, stage, _, note, _ := p.Check(1, fd, pluginMsg{Dst: "127.0.0.1", DPort: uint16(dport), Host: host}, 2*time.Second)
+		return out, stage, note
+	}
+	if out, stage, note := run([]string{"--tls"}, srv.Listener, "name.example"); out != core.AppPassed || note != "418" {
+		t.Fatalf("TLS: %v stage %s note %q", out, stage, note)
+	}
+	if s := <-got; s.host != "name.example" || s.sni != "name.example" || s.method != "HEAD" {
+		t.Fatalf("TLS: the server saw Host %q, server name %q, method %s", s.host, s.sni, s.method)
+	}
+	// The test certificate is not for that name: with --verify the check fails at TLS.
+	if out, stage, _ := run([]string{"--tls", "--verify"}, srv.Listener, "name.example"); out != core.AppFailed || stage != "tls" {
+		t.Fatalf("TLS with --verify: %v stage %s", out, stage)
+	}
+	// Not port 443 and no --tls: plain HTTP.
+	// --get asks with GET, for the URL's path under the URL's host.
+	if out, stage, note := run([]string{"--get", "other.example/index.php"}, plain.Listener, ""); out != core.AppPassed || note != "418" {
+		t.Fatalf("plain: %v stage %s note %q", out, stage, note)
+	}
+	if s := <-got; s.host != "other.example" || s.sni != "" || s.method != "GET" || s.path != "/index.php" {
+		t.Fatalf("plain: the server saw Host %q, server name %q, method %s", s.host, s.sni, s.method)
 	}
 }

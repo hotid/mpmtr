@@ -13,7 +13,8 @@
 //
 //	plugin → mpmtr  {"type":"hello","name":"http","version":"1"}
 //	mpmtr → plugin  {"type":"check","id":7,"src":"192.0.2.1","sport":20031,
-//	                 "dst":"192.0.2.10","dport":443,"server":"S7","timeout_ms":5000}
+//	                 "dst":"192.0.2.10","dport":443,"server":"S7",
+//	                 "host":"example.com","timeout_ms":5000}
 //	                 + the connected TCP socket (SCM_RIGHTS)
 //	plugin → mpmtr  {"type":"result","id":7,"ok":false,"stage":"handshake",
 //	                 "error":"eof","ms":12.5}
@@ -42,6 +43,7 @@ type Request struct {
 	Src     netip.AddrPort
 	Dst     netip.AddrPort
 	Server  string // mpmtr's name of the server behind the address (anycast), may be ""
+	Host    string // the target as typed on mpmtr's command line, without the port: a name or an address
 	Timeout time.Duration
 }
 
@@ -50,6 +52,9 @@ type Result struct {
 	OK    bool
 	Stage string
 	Err   error
+	// Note is optional: a few characters about the answer, shown in the
+	// PLUGIN column of the server's row (an HTTP status, a version).
+	Note string
 }
 
 // Check speaks the protocol over conn (already connected). It must return
@@ -66,10 +71,12 @@ type msg struct {
 	Dst     string  `json:"dst,omitempty"`
 	DPort   uint16  `json:"dport,omitempty"`
 	Server  string  `json:"server,omitempty"`
+	Host    string  `json:"host,omitempty"`
 	Timeout int64   `json:"timeout_ms,omitempty"`
 	OK      bool    `json:"ok,omitempty"`
 	Stage   string  `json:"stage,omitempty"`
 	Error   string  `json:"error,omitempty"`
+	Note    string  `json:"note,omitempty"`
 	Ms      float64 `json:"ms,omitempty"`
 }
 
@@ -122,7 +129,7 @@ func Serve(name, version string, check Check) error {
 		go func(m msg, conn int) {
 			start := time.Now()
 			r := run(m, conn, check)
-			out := msg{Type: "result", ID: m.ID, OK: r.OK, Stage: r.Stage, Ms: float64(time.Since(start).Microseconds()) / 1000}
+			out := msg{Type: "result", ID: m.ID, OK: r.OK, Stage: r.Stage, Note: r.Note, Ms: float64(time.Since(start).Microseconds()) / 1000}
 			if r.Err != nil {
 				out.Error = r.Err.Error()
 			}
@@ -142,7 +149,7 @@ func run(m msg, conn int, check Check) Result {
 		return Result{Stage: "plugin", Err: err}
 	}
 	defer c.Close() // our copy closes before the answer; mpmtr closes the last (RST)
-	req := Request{ID: m.ID, Server: m.Server, Timeout: time.Duration(m.Timeout) * time.Millisecond}
+	req := Request{ID: m.ID, Server: m.Server, Host: m.Host, Timeout: time.Duration(m.Timeout) * time.Millisecond}
 	if a, err := netip.ParseAddr(m.Src); err == nil {
 		req.Src = netip.AddrPortFrom(a, m.SPort)
 	}

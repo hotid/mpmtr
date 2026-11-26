@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/hotid/mpmtr/internal/wire"
@@ -85,6 +86,7 @@ type HopSnap struct {
 	Kind      HopKind      `json:"kind"`               // what the row stands for
 	Responder netip.Addr   `json:"responder,omitzero"` // the router that answers (hop, dst)
 	Server    string       `json:"server,omitempty"`   // server rows: its name
+	AppNote   string       `json:"app_note,omitempty"` // DST and server rows: what the --app plugin noted
 	Others    []netip.Addr `json:"other_responders,omitempty"`
 	Sent      uint32       `json:"sent"`
 	Replies   uint32       `json:"replies"`
@@ -134,6 +136,7 @@ type FlowSnap struct {
 	ACServer    string         `json:"anycast_server,omitempty"`
 	AppStage    string         `json:"app_last_failure_stage,omitempty"`
 	AppErr      string         `json:"app_last_failure,omitempty"`
+	AppNote     string         `json:"app_note,omitempty"`
 	Executed    int            `json:"executed"`
 	W60         WinSnap        `json:"window_60s"`
 	W5          WinSnap        `json:"window_5m"`
@@ -446,7 +449,7 @@ func (c *Core) flowSnap(f *Flow, hops bool) FlowSnap {
 		s.Hops = c.flowHops(f)
 	}
 	s.ACMoved, s.ACUnknown = f.acMoved, f.acUnknown
-	s.AppStage, s.AppErr = f.appStage, f.appErr
+	s.AppStage, s.AppErr, s.AppNote = f.appStage, f.appErr, f.appNote
 	if sv := f.EP.ServerOf(f.SPort()); sv != nil {
 		s.ACServer = sv.Name()
 		// The route of this flow ends at that server, not just at the address.
@@ -895,17 +898,28 @@ func (c *Core) e2eAsHop(g *Group, h *HopSnap) {
 // flows among fl.
 func (c *Core) e2eFlowsAsHop(fl []*Flow, h *HopSnap) {
 	measured := false
+	// What the application plugin noted, when the ports do not agree: each
+	// answer once, in port order.
+	var notes []string
 	for _, f := range fl {
 		if f.Role.Monitored() && f.C.Valid() > 0 {
 			measured = true
 		}
+		if f.Role.Monitored() && f.appNote != "" && !slices.Contains(notes, f.appNote) {
+			notes = append(notes, f.appNote)
+		}
 	}
+	if len(notes) > 3 {
+		notes = append(notes[:3], "…")
+	}
+	note := strings.Join(notes, "|")
+	h.AppNote = note
 	if !measured {
 		return // keep the TTL-limited probes that reached the destination
 	}
 	// Every column from the E2E probes only — never mixed with the
 	// TTL-limited probes of other ports.
-	*h = HopSnap{TTL: h.TTL, Kind: h.Kind, Responder: h.Responder, Flows: h.Flows, Name: h.Name}
+	*h = HopSnap{TTL: h.TTL, Kind: h.Kind, Responder: h.Responder, Flows: h.Flows, Name: h.Name, Server: h.Server, AppNote: note}
 	var valid, fail uint64
 	var v []uint32
 	var jit float64

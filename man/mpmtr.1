@@ -268,7 +268,8 @@ Application check of every measured server by the plugin
 .B mpmtr
 or in
 .BR PATH ;
-a path also works), with its own arguments.
+a path also works), with its own arguments; an argument with spaces goes in
+single quotes inside.
 See
 .BR "APPLICATION CHECKS" .
 .TP
@@ -352,7 +353,9 @@ next to
 or in PATH, or a path) knows about each hop address: a name, shown in place
 of the bare address, and a note in the
 .B PLUGIN
-column (present only with this option). May be given several
+column (present with this option, and with
+.B \-\-app
+when its plugin notes something about the answers). May be given several
 times: the plugins run side by side, the first name wins, the notes are
 joined. In JSON:
 .BR hop_info .
@@ -899,8 +902,14 @@ right after an answered end-to-end probe of its port (a TTL-limited probe
 can leave the 4-tuple half-open on a stateful NAT).
 .PP
 .B mpmtr\-app\-http
-(an HTTP HEAD check) comes with
+(an HTTP HEAD check, over TLS on port 443) comes with
 .BR mpmtr .
+A plugin may add a short note to its verdict (the HTTP status of that
+plugin): it is shown in the
+.B PLUGIN
+column of the row with the port's end-to-end numbers, and is
+.B app_note
+of the flow in JSON.
 The plugin protocol (one JSON message per packet over a unix
 SOCK_SEQPACKET socket on fd 3, the connected socket passed with
 SCM_RIGHTS) and the Go SDK are described in

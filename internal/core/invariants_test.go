@@ -1424,6 +1424,9 @@ func TestAnycastServerPerRoute(t *testing.T) {
 		if r.Hop.Kind != KindServer {
 			continue
 		}
+		if !strings.HasPrefix(r.Hop.Server, "S") {
+			t.Fatalf("server row under %s has no server name: %+v", route, r.Hop)
+		}
 		under[r.Hop.Server]++
 		if len(r.SPorts) == 0 {
 			t.Fatalf("server row %s under %s has no port", r.Hop.Server, route)
@@ -1926,5 +1929,149 @@ func TestAnycastServerLeavesPool(t *testing.T) {
 	s.run(time.Duration(left+2) * 4 * time.Second)
 	if slices.Contains(a.servers, v) || a.phantoms != 1 || len(a.servers) != n-1 {
 		t.Fatalf("still listed %v after every port answered as another server (ports left %v, dropped %d)", slices.Contains(a.servers, v), v.ports, a.phantoms)
+	}
+}
+
+// A server that keeps the connection of a probe it answered (our RST did
+// not reach it) answers the port's later SYNs with an ACK of that probe,
+// for much longer than the guard window. The port is ours alone: the flow
+// is impaired while that lasts, never invalid, and measures again after.
+func TestServerKeepsProbeConnection(t *testing.T) {
+	cfg := simpleCfg()
+	cfg.Discovery = false
+	s := newSim(t, cfg, func(*Flow, Mono) *simPath { return linear(4, 2*time.Millisecond) })
+	from, to := Mono(40*time.Second), Mono(100*time.Second)
+	s.holdOn = func(_ *Flow, now Mono) bool { return now >= from && now < to }
+	ep := s.add(1)
+	f := ep.Flows[0]
+	s.run(95 * time.Second)
+	if f.invalid != ValidFlow {
+		t.Fatalf("the flow is invalid (%v): the port is taken for somebody else's", f.invalid)
+	}
+	if f.C.ChallengeAck < 40 || f.C.RemoteState < 40 || f.C.Unexpected != 0 || f.C.Timeout != 0 {
+		t.Fatalf("held connection not recognised: %+v", f.C)
+	}
+	if !f.sm.impaired {
+		t.Fatalf("the flow is not impaired while the server holds the connection")
+	}
+	valid := f.C.Valid()
+	s.run(120 * time.Second)
+	if f.invalid != ValidFlow || f.State() != FOK || f.sm.impaired || f.C.Valid() < valid+100 {
+		t.Fatalf("no recovery: invalid %v, state %s, impaired %v, valid %d→%d", f.invalid, f.State(), f.sm.impaired, valid, f.C.Valid())
+	}
+}
+
+// Packets that answer no probe of ours still make the flow invalid.
+func TestForeignPacketsStillInvalidate(t *testing.T) {
+	cfg := simpleCfg()
+	cfg.Discovery = false
+	s := newSim(t, cfg, func(*Flow, Mono) *simPath { p := linear(4, 2*time.Millisecond); p.loss = 1; return p })
+	ep := s.add(1)
+	f := ep.Flows[0]
+	for i := 0; i < 20; i++ {
+		s.run(time.Second)
+		s.c.OnPacket(&wire.Packet{Kind: wire.KindTCP, Src: f.Tmpl.Dst, Dst: f.Tmpl.Src, SPort: f.Tmpl.DPort, DPort: f.Tmpl.SPort,
+			Ack: 777, Flags: wire.ACK, TS: int64(s.rtBase) + int64(s.now), TSKernel: true})
+	}
+	s.run(3 * time.Second)
+	if f.invalid != InvalidWeakDominant {
+		t.Fatalf("invalid = %v, want weak/unexpected dominant; %+v", f.invalid, f.C)
+	}
+}
+
+// What the application plugin notes about an answer (an HTTP status) is on
+// the DST row of the route and in the flow's JSON, follows the last answer,
+// and ports that got different answers show each once.
+func TestAppNoteOnDstRow(t *testing.T) {
+	cfg := simpleCfg()
+	cfg.Discovery = true
+	cfg.Flows = 2
+	cfg.App, cfg.AppInterval, cfg.AppTimeout = true, 5*time.Second, 2*time.Second
+	s := newSim(t, cfg, func(*Flow, Mono) *simPath { return linear(3, 20*time.Millisecond) })
+	odd := "200"
+	s.appFn = func(f *Flow) (AppResult, time.Duration) {
+		note := "200"
+		if f.SPort()%2 == 1 {
+			note = odd
+		}
+		return AppResult{Outcome: AppPassed, ConnectRTT: 20 * time.Millisecond, Note: note}, 100 * time.Millisecond
+	}
+	ep := s.add(2)
+	dst := func() string {
+		for _, r := range s.c.Snapshot(SnapOpts{Tree: true, Only: AllEndpoints}).Endpoints[0].Tree {
+			if r.Hop.Kind == KindDst {
+				return r.Hop.AppNote
+			}
+		}
+		t.Fatal("no DST row")
+		return ""
+	}
+	s.run(30 * time.Second)
+	if got := dst(); got != "200" {
+		t.Fatalf("DST row note %q, want 200", got)
+	}
+	odd = "503"
+	s.run(3 * cfg.AppInterval)
+	if got := dst(); got != "200|503" {
+		t.Fatalf("DST row note %q, want 200|503", got)
+	}
+	if got := s.c.flowSnap(ep.Flows[1], false).AppNote; got != "503" {
+		t.Fatalf("flow note %q, want 503", got)
+	}
+}
+
+// The ready queue keeps every flow, in order, when an element is put back
+// at the front of a full buffer, whatever its fill and head position.
+func TestFifoPushFrontFull(t *testing.T) {
+	for n := 0; n <= 40; n++ {
+		for shift := 0; shift <= n; shift++ {
+			var q fifo
+			var want []*Flow
+			for i := 0; i < shift; i++ { // move the head off zero
+				q.push(&Flow{})
+			}
+			for i := 0; i < shift; i++ {
+				q.pop()
+			}
+			for i := 0; i < n; i++ {
+				f := &Flow{Num: i + 1}
+				q.push(f)
+				want = append(want, f)
+			}
+			front := &Flow{Num: -1}
+			q.pushFront(front)
+			want = append([]*Flow{front}, want...)
+			if q.size != len(want) {
+				t.Fatalf("n %d shift %d: size %d, want %d", n, shift, q.size, len(want))
+			}
+			for i, w := range want {
+				if got := q.pop(); got != w {
+					t.Fatalf("n %d shift %d: element %d is %v, want %v", n, shift, i, got, w)
+				}
+			}
+			if q.pop() != nil {
+				t.Fatalf("n %d shift %d: queue not empty", n, shift)
+			}
+		}
+	}
+}
+
+// A process that slept for hours takes up its slots again at once: one
+// probe per interval, none for the slots it slept through.
+func TestSlotsAfterLongPause(t *testing.T) {
+	cfg := simpleCfg()
+	cfg.Discovery = false
+	s := newSim(t, cfg, func(*Flow, Mono) *simPath { return linear(3, 2*time.Millisecond) })
+	ep := s.add(1)
+	f := ep.Flows[0]
+	s.run(10 * time.Second)
+	sent := f.C.Sent
+	s.now += Mono(12 * time.Hour)
+	s.run(10 * time.Second)
+	if d := f.C.Sent - sent; d < 9 || d > 11 {
+		t.Fatalf("%d probes in the 10 s after the pause, want 10", d)
+	}
+	if f.nextE2E <= s.now || f.nextE2E > s.now+Mono(1100*time.Millisecond) {
+		t.Fatalf("next slot %v from now", time.Duration(f.nextE2E-s.now))
 	}
 }

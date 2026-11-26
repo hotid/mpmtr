@@ -103,7 +103,7 @@ func TestExampleAppPlugin(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer unix.Close(fd)
-		out, stage, _, _ := p.Check(id, fd, pluginMsg{Dst: "127.0.0.1", DPort: uint16(dport)}, 500*time.Millisecond)
+		out, stage, _, _, _ := p.Check(id, fd, pluginMsg{Dst: "127.0.0.1", DPort: uint16(dport)}, 500*time.Millisecond)
 		return out == core.AppPassed, stage, out.Local()
 	}
 	if ok, stage, local := check(1, good); !ok || local {

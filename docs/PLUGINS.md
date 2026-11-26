@@ -15,7 +15,8 @@ Two kinds of plugins, both separate executables started by mpmtr:
 mpmtr measures paths and servers with TCP only. A plugin adds an
 application-level check of every measured server: `mpmtr --app NAME` runs
 the executable `mpmtr-app-NAME` (next to mpmtr or in `PATH`; `--app PATH`
-also works); `--app "NAME ARGS..."` passes the plugin its own arguments. Every `--app-interval` (default 10 s) and for each measured
+also works); `--app "NAME ARGS..."` passes the plugin its own arguments (one with spaces
+goes in single quotes inside). Every `--app-interval` (default 10 s) and for each measured
 port, mpmtr
 
 1. opens a real kernel TCP connection **from that port** — the same
@@ -66,10 +67,12 @@ JSON object in one packet.
 ```
 plugin → mpmtr  {"type":"hello","name":"http","version":"1"}
 mpmtr → plugin  {"type":"check","id":7,"src":"192.0.2.1","sport":20031,
-                 "dst":"192.0.2.10","dport":443,"server":"S7","timeout_ms":5000}
+                 "dst":"192.0.2.10","dport":443,"server":"S7",
+                 "host":"example.com","timeout_ms":5000}
                  + the connected TCP socket (SCM_RIGHTS)
 plugin → mpmtr  {"type":"result","id":7,"ok":false,"stage":"handshake",
                  "error":"eof","ms":12.5}
+plugin → mpmtr  {"type":"result","id":8,"ok":true,"note":"200","ms":9.1}
 ```
 
 * `hello` first, within 5 s.
@@ -80,7 +83,16 @@ plugin → mpmtr  {"type":"result","id":7,"ok":false,"stage":"handshake",
   the connections it still holds are closed; the report is then INCOMPLETE.
 * `stage` names where the check failed, in your words; `stage:"plugin"`
   marks a plugin-side problem (local error, not the server's fault).
+* `note` is optional: a few characters about the answer (an HTTP status, a
+  version), at most 24. It is shown in the `PLUGIN` column of the row the
+  port's end-to-end numbers are on (the route's DST row, or the server's row
+  with `--anycast`) and is `app_note` of the flow in JSON. It follows the
+  last check the server answered; ports of one row that got different notes
+  show each once (`200|503`). `mpmtr-app-http` sends the status code.
 * `server` is mpmtr's name of the server behind the address (`--anycast`).
+* `host` is the target as typed on mpmtr's command line, without the port: a
+  name or an address. A plugin that needs the name (an HTTP `Host` header, a
+  TLS server name) takes it from here.
 * stderr is kept for diagnostics (shown when the plugin dies).
 
 ### Go SDK
@@ -89,7 +101,7 @@ Package `github.com/hotid/mpmtr/plugin` implements the protocol:
 
 ```go
 plugin.Serve("http", "1", func(ctx context.Context, c net.Conn, req plugin.Request) plugin.Result {
-	fmt.Fprintf(c, "HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n", req.Dst.Addr())
+	fmt.Fprintf(c, "HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n", req.Host)
 	line, err := bufio.NewReader(c).ReadString('\n')
 	if err != nil {
 		return plugin.Result{Stage: "answer", Err: err}
@@ -98,7 +110,8 @@ plugin.Serve("http", "1", func(ctx context.Context, c net.Conn, req plugin.Reque
 })
 ```
 
-`cmd/mpmtr-app-http` is this example as a complete plugin. It passes when
+`cmd/mpmtr-app-http` is this example as a complete plugin, with TLS on port
+443 and options of its own (`man mpmtr-app-http`). It passes when
 the server answers with an HTTP status line, whatever the status: a 503 is a
 pass. It shows that something speaks HTTP on that server, not that the
 service works; a check of your service belongs in a plugin of your own.

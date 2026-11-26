@@ -25,8 +25,9 @@ type Names interface {
 	Note(ip netip.Addr) string
 }
 
-// PluginNames is implemented by Names that run hop-information plugins
-// (--hop-info): what they say about a hop has its own column.
+// PluginNames is implemented by Names that run plugins: what the
+// hop-information plugins (--hop-info) say about a hop, and what the
+// application plugin (--app) notes about a server, has its own column.
 type PluginNames interface {
 	PluginNote(ip netip.Addr) string
 	PluginWidth() int // width of the PLUGIN column; 0 = no plugins, no column
@@ -276,8 +277,12 @@ func HopLineNote(h core.HopSnap, names Names, prefix, note string) string {
 	if w := pluginWidth(names); w > 0 {
 		pn := ""
 		if h.Responder.IsValid() && h.Kind != core.KindServer && h.Kind != core.KindSilent {
-			pn = trunc(names.(PluginNames).PluginNote(h.Responder), w)
+			pn = names.(PluginNames).PluginNote(h.Responder)
 		}
+		if h.AppNote != "" { // DST and server rows: the application plugin's note
+			pn = strings.TrimSpace(pn + " " + h.AppNote)
+		}
+		pn = trunc(pn, w)
 		// padded even when empty: what the caller puts after the row (the
 		// route of a DST row) stays under FLAGS
 		tail = pn + strings.Repeat(" ", w-len([]rune(pn))) + " " + tail

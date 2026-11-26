@@ -184,6 +184,11 @@ type Config struct {
 	AppInterval time.Duration
 	AppTimeout  time.Duration
 
+	// TOS (IPv4 TOS / IPv6 traffic class) and the IPv6 flow label of every
+	// probe: part of a flow's identity, the same for all flows.
+	TOS       uint8
+	FlowLabel uint32
+
 	DiscInitial int // 32
 
 	Seed uint64
@@ -342,6 +347,7 @@ type AppResult struct {
 	AppTime    time.Duration // the plugin's exchange time
 	Stage      string        // where it failed, in the plugin's words: for display only
 	Err        string        // its error text: for display only
+	Note       string        // a few characters about the answer: for display only
 }
 
 // Clock returns the current monotonic and wall-clock time.

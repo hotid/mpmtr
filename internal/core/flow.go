@@ -326,8 +326,14 @@ type Flow struct {
 	yieldCount  int
 	e2eDeferred bool
 	remoteUntil Mono // remote TCP state for an earlier probe suspected until
-	lastSeq     uint32
-	isnF        uint32 // per-4-tuple ISN offset (RFC 6528 F())
+	// reached: the last probes that could reach the destination. Such a
+	// probe can leave a connection on the server (also when its answer was
+	// lost on the way back), and the server may keep it for a minute or
+	// more when our RST does not reach it.
+	reached  [128]uint32
+	reachedN int
+	lastSeq  uint32
+	isnF     uint32 // per-4-tuple ISN offset (RFC 6528 F())
 
 	C         Counters
 	win       window
@@ -355,6 +361,7 @@ type Flow struct {
 	appUntil   Mono   // packets of the 4-tuple belong to a real connection until then
 	appStage   string // last failed check: where and why
 	appErr     string
+	appNote    string // what the plugin noted about the last answered check
 
 	route     *RouteObs
 	routeHist []*RouteObs
@@ -397,6 +404,23 @@ func (f *Flow) pushRecent(p *Probe, now Mono) {
 		replied: p.outcome.Positive() || p.outcome == OutTimeExceeded || p.outcome == OutDestReached || p.outcome == OutICMPUnreach || p.outcome == OutWeak,
 		outcome: p.outcome, endMono: now, used: true, from: p.from}
 	f.recentPos = (f.recentPos + 1) % recentProbe
+}
+
+// noteReached remembers a probe that could reach the destination.
+func (f *Flow) noteReached(seq uint32) {
+	f.reached[f.reachedN%len(f.reached)] = seq
+	f.reachedN++
+}
+
+// wasReached reports whether seq is one of the last probes that could reach
+// the destination.
+func (f *Flow) wasReached(seq uint32) bool {
+	for i := 0; i < min(f.reachedN, len(f.reached)); i++ {
+		if f.reached[i] == seq {
+			return true
+		}
+	}
+	return false
 }
 
 // recentWithin calls fn for the recent probes still inside the guard
