@@ -210,3 +210,16 @@ func TestHTTPPluginTLSAndHost(t *testing.T) {
 		t.Fatalf("plain: the server saw Host %q, server name %q, method %s", s.host, s.sni, s.method)
 	}
 }
+
+// A plugin closed while its read loop runs must not leave that loop reading
+// the descriptor number, which the next plugin's socket may get: it would
+// take that plugin's hello.
+func TestPluginRestart(t *testing.T) {
+	for i := 0; i < 60; i++ {
+		p, err := StartPlugin("/usr/bin/env", []string{"MPMTR_TEST_HOP_PLUGIN=app-hang", os.Args[0]})
+		if err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+		p.Close()
+	}
+}

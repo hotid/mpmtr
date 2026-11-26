@@ -48,10 +48,10 @@ type pluginMsg struct {
 	Ms      float64 `json:"ms,omitempty"`
 }
 
-// Plugin is a running application-check plugin.
 // appNoteMax is the longest note of a check that is shown.
 const appNoteMax = 24
 
+// Plugin is a running application-check plugin.
 type Plugin struct {
 	Name, Version string
 	cmd           *exec.Cmd
@@ -59,8 +59,9 @@ type Plugin struct {
 	mu            sync.Mutex
 	wait          map[uint64]chan pluginMsg
 	dead          error
-	silent        int          // checks in a row the plugin gave no result for
-	noteW         atomic.Int32 // widest note a result carried
+	silent        int           // checks in a row the plugin gave no result for
+	loopDone      chan struct{} // closed when readLoop has returned; nil before it starts
+	noteW         atomic.Int32  // widest note a result carried
 	errTail       *tail
 }
 
@@ -123,6 +124,7 @@ func StartPlugin(path string, args []string) (*Plugin, error) {
 		return nil, fmt.Errorf("plugin %s did not say hello: %w %s", path, err, p.errTail.String())
 	}
 	p.Name, p.Version = clean(hello.Name, 32), clean(hello.Version, 32)
+	p.loopDone = make(chan struct{})
 	go p.readLoop()
 	go func() {
 		if err := p.cmd.Wait(); err != nil {
@@ -161,6 +163,7 @@ func (p *Plugin) recv(timeout time.Duration) (pluginMsg, error) {
 }
 
 func (p *Plugin) readLoop() {
+	defer close(p.loopDone)
 	for {
 		m, err := p.recv(0)
 		if errors.Is(err, unix.EINTR) {
@@ -260,6 +263,14 @@ func (p *Plugin) Check(id uint64, conn int, m pluginMsg, timeout time.Duration) 
 func (p *Plugin) Close() {
 	if p.cmd != nil && p.cmd.Process != nil {
 		p.cmd.Process.Kill()
+	}
+	// The read loop must be done with the descriptor before it is closed:
+	// its number goes to the next socket opened, and a loop still reading
+	// it would take that socket's messages (another plugin's hello).
+	// Shutdown wakes a loop waiting in recvmsg.
+	unix.Shutdown(p.fd, unix.SHUT_RDWR)
+	if p.loopDone != nil {
+		<-p.loopDone
 	}
 	unix.Close(p.fd)
 }
