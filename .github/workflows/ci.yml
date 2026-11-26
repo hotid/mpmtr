@@ -31,3 +31,11 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends man-db groff-base
           make man-check
+      - name: docs/man is generated from the man pages
+        env:
+          PANDOC_VERSION: 3.7.0.2
+        run: |
+          curl -fsSL -o /tmp/pandoc.deb "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
+          sudo dpkg -i /tmp/pandoc.deb
+          make man-md
+          test -z "$(git status --porcelain docs/man)" || { git status --porcelain docs/man; git diff docs/man; echo 'docs/man is out of date: run "make man-md"'; exit 1; }

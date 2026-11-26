@@ -13,6 +13,7 @@ make vet            # go vet and gofmt
 make integration    # root: network namespaces, veth, ECMP, tc netem (≈20 min)
 make bench          # synthetic core benchmarks
 make man-check      # the man pages render without warnings
+make man-md         # docs/man: the man pages as Markdown (needs pandoc)
 ```
 
 The core has no I/O: probes go out through a `Transport`, packets and

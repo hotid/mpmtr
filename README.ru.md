@@ -401,7 +401,8 @@ TTL   HOST                                      Loss%  Snt    Last     Med     P
 
 | | |
 |---|---|
-| `man mpmtr` | все опции, клавиши, поля вывода и коды возврата |
+| `man mpmtr` ([docs/man/mpmtr.ru.md](docs/man/mpmtr.ru.md)) | все опции, клавиши, поля вывода и коды возврата |
+| [docs/man](docs/man) | man-страницы плагинов: [mpmtr-app-http](docs/man/mpmtr-app-http.ru.md), [mpmtr-hop-snmp](docs/man/mpmtr-hop-snmp.ru.md) |
 | [docs/MEASUREMENT.ru.md](docs/MEASUREMENT.ru.md) | пробы, сопоставление ответов, что считается результатом, состояния и пороги |
 | [docs/DISCOVERY.ru.md](docs/DISCOVERY.ru.md) | как находятся и группируются маршруты, смена маршрута, локализация |
 | [docs/ANYCAST.ru.md](docs/ANYCAST.ru.md) | серверы за одним адресом: метод и где он не работает |

@@ -13,6 +13,7 @@ make vet            # go vet и gofmt
 make integration    # root: сетевые пространства имён, veth, ECMP, tc netem (≈20 мин)
 make bench          # синтетические бенчмарки ядра
 make man-check      # man-страницы рендерятся без предупреждений
+make man-md         # docs/man: man-страницы в Markdown (нужен pandoc)
 ```
 
 Измерительное ядро mpmtr само ввода-вывода не делает: пробы уходят через

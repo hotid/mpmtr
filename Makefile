@@ -1,4 +1,4 @@
-.PHONY: build test race vet integration bench setcap install uninstall man-check dist clean
+.PHONY: build test race vet integration bench setcap install uninstall man-check man-md dist clean
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 PREFIX  ?= /usr/local
@@ -58,6 +58,17 @@ man-check:
 	@for p in $(MANPAGES:%=man/%) $(MANPAGES:%=man/ru/%); do \
 		out=$$(LC_ALL=C.UTF-8 MANWIDTH=80 man --warnings -E UTF-8 -l $$p 2>&1 >/dev/null); \
 		test -z "$$out" || { echo "$$p:"; echo "$$out"; exit 1; }; \
+	done
+
+# The man pages as Markdown in docs/man, for reading on the web. Needs pandoc
+# (the version CI pins: PANDOC_VERSION in .github/workflows/ci.yml).
+man-md:
+	@mkdir -p docs/man
+	@for p in $(MANPAGES:.1=); do \
+		{ printf '<!-- Generated from man/%s.1 by "make man-md": edit the man page, not this file. -->\n\n[Русская версия](%s.ru.md)\n\n' $$p $$p; \
+		  pandoc -f man -t gfm -L man/gfm.lua man/$$p.1; } > docs/man/$$p.md || exit 1; \
+		{ printf '<!-- Generated from man/ru/%s.1 by "make man-md": edit the man page, not this file. -->\n\n[English version](%s.md)\n\n' $$p $$p; \
+		  pandoc -f man -t gfm -L man/gfm.lua man/ru/$$p.1; } > docs/man/$$p.ru.md || exit 1; \
 	done
 
 # Release archives for linux/amd64 and linux/arm64 in dist/.

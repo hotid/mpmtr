@@ -394,7 +394,8 @@ own in [docs/WRITING_PLUGINS.md](docs/WRITING_PLUGINS.md).
 
 | | |
 |---|---|
-| `man mpmtr` | every option, key, output field and exit code |
+| `man mpmtr` ([docs/man/mpmtr.md](docs/man/mpmtr.md)) | every option, key, output field and exit code |
+| [docs/man](docs/man) | the man pages of the plugins: [mpmtr-app-http](docs/man/mpmtr-app-http.md), [mpmtr-hop-snmp](docs/man/mpmtr-hop-snmp.md) |
 | [docs/MEASUREMENT.md](docs/MEASUREMENT.md) | probes, matching of replies, what counts as a result, states and thresholds |
 | [docs/DISCOVERY.md](docs/DISCOVERY.md) | how routes are found and grouped, route changes, localization |
 | [docs/ANYCAST.md](docs/ANYCAST.md) | servers behind one address: the method and where it cannot work |
