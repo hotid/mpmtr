@@ -176,7 +176,7 @@ func newFlagSet(f *flags, out io.Writer) *flag.FlagSet {
 	b(&f.noDNS, false, "no reverse DNS (default)", "n", "no-dns")
 	b(&f.dns, false, "enable reverse DNS of hops", "dns")
 	b(&f.asn, false, "annotate hops with their AS (asks whois.cymru.com about public hop addresses)", "asn")
-	b(&f.ix, false, "mark hops on Internet exchange peering LANs (PeeringDB data, cached for a day)", "ix")
+	b(&f.ix, false, "mark hops on Internet exchange peering LANs and name the IX member there (PeeringDB data, cached for a day)", "ix")
 	s(&f.geoip, "", "offline GeoIP and/or ASN databases (.mmdb, comma separated): country/city, AS without --asn", "geoip")
 	b(&f.json, false, "JSON report (with --report or --discover)", "json")
 	s(&f.events, "", "write JSONL events to FILE ('-' = stdout, disables the interactive screen)", "events")

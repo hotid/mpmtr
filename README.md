@@ -255,8 +255,12 @@ TTL   HOST                                      Loss%  Snt    Last     Med     P
   FLAGS, where it changes along the route.
   * **`--asn`** — the origin AS (`AS15169 GOOGLE`, Team Cymru bulk whois;
     only public addresses are sent).
-  * **`--ix`** — an Internet exchange LAN (`IX:LINX LON1`, PeeringDB
-    prefixes cached for a day in `~/.cache/mpmtr`).
+  * **`--ix`** — an Internet exchange LAN and the IX member whose router
+    has the address (`IX:LINX LON1 member AS15169 Google LLC`; PeeringDB
+    prefixes and member addresses, cached for a day in `~/.cache/mpmtr`).
+    PeeringDB throttles clients that ask often without an account (HTTP 429
+    for up to an hour); a refused list is asked again after an hour and a
+    warning says so (see Limitations).
   * **`--geoip FILE[,FILE]`** — the country/city (`(DE, Frankfurt)`) and,
     from an ASN database, the AS — offline, from MaxMind GeoLite2 or DB-IP
     lite `.mmdb` files.
@@ -433,6 +437,11 @@ own in [docs/WRITING_PLUGINS.md](docs/WRITING_PLUGINS.md).
   both directions is not affected: no repeats arrive.
 * Bound-only port reservation protects against autobind and other binds, not
   against a privileged process that sends raw packets with the same ports.
+* `--ix` depends on PeeringDB, which throttles anonymous clients: several
+  first downloads in a short time (several hosts behind one address, a
+  cleared cache) can be refused for up to an hour. Until then IX hops are not
+  marked (or are marked from an older cache, or without the member network);
+  the warning gives the time of the next try.
 
 ## License
 

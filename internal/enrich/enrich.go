@@ -1,6 +1,7 @@
 // Package enrich annotates hop addresses with the network they belong to:
 // the origin AS (Team Cymru whois, or an offline ASN .mmdb), the Internet
-// exchange whose peering LAN the address is on (PeeringDB, cached) and the
+// exchange whose peering LAN the address is on together with the IX member
+// network that holds the address there (PeeringDB, cached) and the
 // country/city (an offline GeoIP .mmdb such as MaxMind GeoLite2 or DB-IP
 // lite). Every source is off unless asked for. Lookups run in the
 // background; Note returns "" until an answer is in. Private, shared and
@@ -19,12 +20,16 @@ import (
 
 // Info is what is known about one address.
 type Info struct {
-	ASN     uint32 `json:"asn,omitempty"`
-	ASName  string `json:"as_name,omitempty"`
-	Prefix  string `json:"prefix,omitempty"`
-	IX      string `json:"ix,omitempty"`
-	Country string `json:"country,omitempty"`
-	City    string `json:"city,omitempty"`
+	ASN    uint32 `json:"asn,omitempty"`
+	ASName string `json:"as_name,omitempty"`
+	Prefix string `json:"prefix,omitempty"`
+	IX     string `json:"ix,omitempty"`
+	// The IX member network that has this address on the peering LAN
+	// (PeeringDB netixlan): the operator of the router, not the IX.
+	IXMemberASN  uint32 `json:"ix_member_asn,omitempty"`
+	IXMemberName string `json:"ix_member_name,omitempty"`
+	Country      string `json:"country,omitempty"`
+	City         string `json:"city,omitempty"`
 }
 
 func (i Info) empty() bool { return i == Info{} }
@@ -32,7 +37,7 @@ func (i Info) empty() bool { return i == Info{} }
 // Options selects the sources.
 type Options struct {
 	ASN      bool     // Team Cymru whois (sends public hop addresses to it)
-	IX       bool     // PeeringDB IX peering LAN prefixes
+	IX       bool     // PeeringDB IX peering LAN prefixes and member addresses
 	MMDB     []string // offline .mmdb files: GeoIP (country/city) and/or ASN
 	CacheDir string   // for the PeeringDB data ("" = no cache)
 	Whois    string   // whois server (default whois.cymru.com:43)
@@ -152,7 +157,8 @@ func (e *Enricher) Lookup(a netip.Addr) (Info, bool) {
 	}
 	in := e.info[a]
 	if e.ix != nil && in.IX == "" {
-		in.IX = e.ix.find(a)
+		h := e.ix.find(a)
+		in.IX, in.IXMemberASN, in.IXMemberName = h.IX, h.Member.ASN, h.Member.Name
 	}
 	return in, !in.empty()
 }
@@ -192,8 +198,9 @@ func (e *Enricher) offline(a netip.Addr) Info {
 }
 
 // Note is the short annotation of ip for a hop row: "AS15169 GOOGLE
-// IX:DE-CIX Frankfurt (DE, Frankfurt am Main)"; "" if nothing is known
-// (yet).
+// (DE, Frankfurt am Main)", or on an IX peering LAN "IX:DE-CIX Frankfurt
+// member AS15169 Google" (the member is the network whose router has the
+// address); "" if nothing is known (yet).
 func (e *Enricher) Note(ip netip.Addr) string {
 	in, ok := e.Lookup(ip)
 	if !ok {
@@ -208,7 +215,14 @@ func (e *Enricher) Note(ip netip.Addr) string {
 		p = append(p, s)
 	}
 	if in.IX != "" {
-		p = append(p, "IX:"+in.IX)
+		s := "IX:" + in.IX
+		if in.IXMemberASN != 0 {
+			s += " member AS" + strconv.FormatUint(uint64(in.IXMemberASN), 10)
+			if n := shortASName(in.IXMemberName); n != "" {
+				s += " " + n
+			}
+		}
+		p = append(p, s)
 	}
 	if in.Country != "" {
 		g := in.Country

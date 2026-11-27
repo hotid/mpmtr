@@ -256,10 +256,18 @@ addresses are never sent.
 
 **--ix**  
 <b>IX:</b><i>name</i> on a hop whose address is on an Internet exchange
-peering LAN: the router there belongs to an IX member, the AS is usually
-not announced. The prefix list comes from PeeringDB (three API
-requests), is cached for a day in *~/.cache/mpmtr/peeringdb-ix.json* and
-an older copy is used when the download fails.
+peering LAN, followed by <b>member AS</b><i>number name</i> when
+PeeringDB lists the address as an IX member's, e.g. **IX:DE-CIX
+Frankfurt member AS15169 Google LLC**. The address belongs to the IX's
+LAN, the router to that member: neither **--asn** nor registry whois
+names the member, which is the network the path enters there. The prefix
+and member lists come from PeeringDB (five API requests, about 7 MB),
+are cached for a day in *~/.cache/mpmtr/peeringdb-ix.json* and an older
+copy is used when the download fails. PeeringDB limits clients that ask
+often without an account (HTTP 429, for up to an hour): a list it
+refused is asked again after an hour, not on every run, and a warning
+says why it failed, when it is asked again and what is shown meanwhile
+(no IX marks without the prefixes, no member without the member list).
 
 **--geoip** <i>FILE</i><b>\[,</b><i>FILE</i><b>...\]</b>  
 Offline lookups in MaxMind DB files: country and city from a GeoIP
@@ -879,6 +887,12 @@ mpmtr --asn --ix --geoip GeoLite2-Country.mmdb example.com
 - The port reservation protects against **connect**(2) and other binds,
   not against another privileged process that sends raw packets from the
   same ports.
+
+- **--ix** depends on PeeringDB, which throttles anonymous clients:
+  several first downloads in a short time (several hosts behind one
+  address, a cleared cache) can be refused for up to an hour. Until then
+  IX hops are not marked (or are marked from an older cache, or without
+  the member network); the warning gives the time of the next try.
 
 # SEE ALSO
 

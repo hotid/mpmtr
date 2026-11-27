@@ -2,7 +2,9 @@ package enrich
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -126,6 +128,10 @@ func TestIXPeeringDB(t *testing.T) {
 			fmt.Fprint(w, `{"data":[{"id":31,"ix_id":31},{"id":8,"ix_id":7}]}`)
 		case "/ixpfx":
 			fmt.Fprint(w, `{"data":[{"prefix":"80.81.192.0/21","ixlan_id":31},{"prefix":"2001:7f8::/64","ixlan_id":31},{"prefix":"195.208.208.0/21","ixlan_id":8}]}`)
+		case "/netixlan":
+			fmt.Fprint(w, `{"data":[{"asn":15169,"ipaddr4":"80.81.193.108","ipaddr6":"2001:7f8::3b41:0:1"},{"asn":13238,"ipaddr4":"195.208.209.33","ipaddr6":null},{"asn":0,"ipaddr4":"80.81.193.1","ipaddr6":null}]}`)
+		case "/net":
+			fmt.Fprint(w, `{"data":[{"asn":15169,"name":"Google LLC"},{"asn":13238,"name":"YANDEX LLC"}]}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -149,6 +155,20 @@ func TestIXPeeringDB(t *testing.T) {
 	if n := e.Note(netip.MustParseAddr("8.8.8.8")); n != "" {
 		t.Fatalf("non-IX address noted %q", n)
 	}
+	// Member addresses name the network whose router is there.
+	for ip, want := range map[string]string{
+		"80.81.193.108":      "IX:DE-CIX Frankfurt member AS15169 Google LLC",
+		"2001:7f8::3b41:0:1": "IX:DE-CIX Frankfurt member AS15169 Google LLC",
+		"195.208.209.33":     "IX:MSK-IX Moscow member AS13238 YANDEX LLC",
+		"80.81.193.1":        "IX:DE-CIX Frankfurt", // ASN 0 in the list: no member
+	} {
+		if n := e.Note(netip.MustParseAddr(ip)); n != want {
+			t.Errorf("%s: note %q, want %q", ip, n, want)
+		}
+	}
+	if in, _ := e.Lookup(netip.MustParseAddr("80.81.193.108")); in.IXMemberASN != 15169 || in.IXMemberName != "Google LLC" {
+		t.Errorf("member info %+v", in)
+	}
 	e.Close()
 	if _, err := os.Stat(filepath.Join(dir, "peeringdb-ix.json")); err != nil {
 		t.Fatal("no cache written")
@@ -163,6 +183,121 @@ func TestIXPeeringDB(t *testing.T) {
 	}
 	if n := e2.Note(netip.MustParseAddr("80.81.194.12")); n != "IX:DE-CIX Frankfurt" {
 		t.Fatalf("from cache: %q", n)
+	}
+	if n := e2.Note(netip.MustParseAddr("195.208.209.33")); n != "IX:MSK-IX Moscow member AS13238 YANDEX LLC" {
+		t.Fatalf("member from cache: %q", n)
+	}
+}
+
+// PeeringDB throttles clients that ask often (HTTP 429). Without the member
+// lists the prefixes still mark IX hops and are cached; a refused list is
+// not asked again within the hour, and after that only that list is asked.
+func TestIXMembersUnavailable(t *testing.T) {
+	var mu sync.Mutex
+	asked := map[string]int{}
+	members := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked[r.URL.Path]++
+		m := members
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/ix":
+			fmt.Fprint(w, `{"data":[{"id":31,"name":"DE-CIX Frankfurt"}]}`)
+		case "/ixlan":
+			fmt.Fprint(w, `{"data":[{"id":31,"ix_id":31}]}`)
+		case "/ixpfx":
+			fmt.Fprint(w, `{"data":[{"prefix":"80.81.192.0/21","ixlan_id":31}]}`)
+		case "/netixlan":
+			if m {
+				fmt.Fprint(w, `{"data":[{"asn":15169,"ipaddr4":"80.81.193.108","ipaddr6":null}]}`)
+				return
+			}
+			http.Error(w, "throttled", http.StatusTooManyRequests)
+		case "/net":
+			fmt.Fprint(w, `{"data":[{"asn":15169,"name":"Google LLC"}]}`)
+		}
+	}))
+	defer ts.Close()
+	dir := t.TempDir()
+	run := func() (note string, warn string, n map[string]int) {
+		mu.Lock()
+		clear(asked)
+		mu.Unlock()
+		var w atomic.Value
+		w.Store("")
+		e, err := New(Options{IX: true, PDB: ts.URL, CacheDir: dir, Warn: func(s string) { w.Store(s) }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer e.Close()
+		e.Settle(5 * time.Second)
+		mu.Lock()
+		defer mu.Unlock()
+		return e.Note(netip.MustParseAddr("80.81.193.108")), w.Load().(string), maps.Clone(asked)
+	}
+
+	note, warn, n := run()
+	if note != "IX:DE-CIX Frankfurt" || !strings.Contains(warn, "member list failed") {
+		t.Fatalf("first run: note %q, warning %q", note, warn)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "peeringdb-ix.json")); err != nil {
+		t.Fatal("the prefixes were not cached")
+	}
+	note, warn, n = run()
+	if len(n) != 0 || note != "IX:DE-CIX Frankfurt" || !strings.Contains(warn, "member list failed at") {
+		t.Fatalf("within the hour: asked %v, note %q, warning %q", n, note, warn)
+	}
+	// An hour later the member list alone is asked again.
+	path := filepath.Join(dir, "peeringdb-ix.json")
+	b, _ := os.ReadFile(path)
+	var c ixCache
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatal(err)
+	}
+	c.MembersTried = c.MembersTried.Add(-2 * time.Hour)
+	b, _ = json.Marshal(c)
+	os.WriteFile(path, b, 0o644)
+	mu.Lock()
+	members = true
+	mu.Unlock()
+	note, _, n = run()
+	if note != "IX:DE-CIX Frankfurt member AS15169 Google LLC" || n["/ixpfx"] != 0 || n["/netixlan"] != 1 {
+		t.Fatalf("after the hour: asked %v, note %q", n, note)
+	}
+}
+
+// A cache of the earlier format (version 1, prefixes only) is used for the
+// prefixes; only the member lists are downloaded.
+func TestIXCacheVersion1(t *testing.T) {
+	var asked sync.Map
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked.Store(r.URL.Path, true)
+		switch r.URL.Path {
+		case "/netixlan":
+			fmt.Fprint(w, `{"data":[{"asn":15169,"ipaddr4":"80.81.193.108","ipaddr6":null}]}`)
+		case "/net":
+			fmt.Fprint(w, `{"data":[{"asn":15169,"name":"Google LLC"}]}`)
+		default:
+			http.Error(w, "throttled", http.StatusTooManyRequests)
+		}
+	}))
+	defer ts.Close()
+	dir := t.TempDir()
+	v1 := fmt.Sprintf(`{"version":1,"source":%q,"fetched":%q,"prefixes":[{"p":"80.81.192.0/21","ix":"DE-CIX Frankfurt"}]}`,
+		ts.URL, time.Now().Add(-time.Hour).Format(time.RFC3339))
+	os.WriteFile(filepath.Join(dir, "peeringdb-ix.json"), []byte(v1), 0o644)
+	e, err := New(Options{IX: true, PDB: ts.URL, CacheDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	e.Settle(5 * time.Second)
+	if n := e.Note(netip.MustParseAddr("80.81.193.108")); n != "IX:DE-CIX Frankfurt member AS15169 Google LLC" {
+		t.Fatalf("note %q", n)
+	}
+	if _, ok := asked.Load("/ixpfx"); ok {
+		t.Fatal("the cached prefixes were downloaded again")
 	}
 }
 

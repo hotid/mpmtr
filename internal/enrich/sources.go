@@ -117,16 +117,32 @@ func whoisBulk(server string, addrs []netip.Addr) (map[netip.Addr]Info, error) {
 	return out, nil
 }
 
-// ixTable holds the IX peering LAN prefixes, longest first.
+// ixTable holds the IX peering LAN prefixes, longest first, and the
+// addresses the IX members have on those LANs.
 type ixTable struct {
-	mu   sync.Mutex
-	done bool
-	pfx  []ixPrefix
+	mu      sync.Mutex
+	done    bool
+	pfx     []ixPrefix
+	members map[netip.Addr]ixMember
 }
 
 type ixPrefix struct {
 	P  netip.Prefix `json:"p"`
 	IX string       `json:"ix"`
+}
+
+// ixMember is one address of an IX member on a peering LAN (PeeringDB
+// netixlan): the router there belongs to that network, not to the IX.
+type ixMember struct {
+	IP   netip.Addr `json:"ip"`
+	ASN  uint32     `json:"asn"`
+	Name string     `json:"name,omitempty"`
+}
+
+// ixHit is what the IX data says about one address.
+type ixHit struct {
+	IX     string
+	Member ixMember // zero when the address is not a known member's
 }
 
 func (t *ixTable) ready() bool {
@@ -135,34 +151,58 @@ func (t *ixTable) ready() bool {
 	return t.done
 }
 
-func (t *ixTable) set(p []ixPrefix) {
+func (t *ixTable) set(p []ixPrefix, members []ixMember) {
 	sort.Slice(p, func(i, j int) bool { return p[i].P.Bits() > p[j].P.Bits() })
+	m := make(map[netip.Addr]ixMember, len(members))
+	for _, x := range members {
+		m[x.IP] = x
+	}
 	t.mu.Lock()
-	t.pfx, t.done = p, true
+	t.pfx, t.members, t.done = p, m, true
 	t.mu.Unlock()
 }
 
-func (t *ixTable) find(a netip.Addr) string {
+func (t *ixTable) find(a netip.Addr) ixHit {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, p := range t.pfx {
 		if p.P.Contains(a) {
-			return p.IX
+			return ixHit{IX: p.IX, Member: t.members[a]}
 		}
 	}
-	return ""
+	return ixHit{}
 }
 
 // ixCache is the file kept in the cache dir. Version is checked before the
-// age: a cache written by another format is rebuilt.
+// age: a cache written by another format is rebuilt (version 1, prefixes
+// only, is read as a cache without members).
+//
+// Each list keeps when it was fetched and when a download of it last
+// failed: PeeringDB throttles clients that ask often without an account
+// (HTTP 429 for up to an hour), so a refused list is not asked again for
+// ixRetry, and a list that came is kept for ixFresh even when the other
+// one failed.
 type ixCache struct {
-	Version  int        `json:"version"`
-	Source   string     `json:"source"`
-	Fetched  time.Time  `json:"fetched"`
-	Prefixes []ixPrefix `json:"prefixes"`
+	Version        int        `json:"version"`
+	Source         string     `json:"source"`
+	Fetched        time.Time  `json:"fetched"`        // the prefixes
+	Tried          time.Time  `json:"tried,omitzero"` // last failed prefix download
+	Err            string     `json:"err,omitempty"`  // and why
+	Prefixes       []ixPrefix `json:"prefixes"`
+	Members        []ixMember `json:"members,omitempty"`
+	MembersFetched time.Time  `json:"members_fetched,omitzero"`
+	MembersTried   time.Time  `json:"members_tried,omitzero"` // last failed member download
+	MembersErr     string     `json:"members_err,omitempty"`
 }
 
-const ixCacheVersion = 1
+// Version 3: the member addresses (netixlan) and the failed attempts are
+// kept as well.
+const ixCacheVersion = 3
+
+const (
+	ixFresh = 24 * time.Hour // a list is downloaded again after this
+	ixRetry = time.Hour      // a list PeeringDB refused is asked again after this
+)
 
 func (e *Enricher) ixCachePath() string {
 	if e.opt.CacheDir == "" {
@@ -171,65 +211,151 @@ func (e *Enricher) ixCachePath() string {
 	return filepath.Join(e.opt.CacheDir, "peeringdb-ix.json")
 }
 
-// loadIX uses a cached copy younger than a day, otherwise downloads the
-// PeeringDB lists; a failed download falls back to an older cache.
-func (e *Enricher) loadIX() {
-	var cached *ixCache
-	if p := e.ixCachePath(); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			var c ixCache
-			if json.Unmarshal(b, &c) == nil && c.Version == ixCacheVersion && c.Source == e.opt.PDB {
-				cached = &c
-			}
-		}
+// readIXCache returns the cache for this source, or an empty one.
+func (e *Enricher) readIXCache() ixCache {
+	empty := ixCache{Version: ixCacheVersion, Source: e.opt.PDB}
+	p := e.ixCachePath()
+	if p == "" {
+		return empty
 	}
-	if cached != nil && time.Since(cached.Fetched) < 24*time.Hour {
-		e.ix.set(cached.Prefixes)
-		return
-	}
-	p, err := fetchIX(e.opt.PDB)
+	b, err := os.ReadFile(p)
 	if err != nil {
-		if cached != nil {
-			e.ix.set(cached.Prefixes)
-			e.warnOnce("ix", fmt.Sprintf("ix: PeeringDB download failed (%v); using data from %s", err, cached.Fetched.Format("2006-01-02")))
-			return
-		}
-		e.ix.set(nil)
-		e.warnOnce("ix", "ix: PeeringDB download failed: "+err.Error())
+		return empty
+	}
+	var c ixCache
+	if json.Unmarshal(b, &c) != nil || c.Source != e.opt.PDB {
+		return empty
+	}
+	switch c.Version {
+	case ixCacheVersion:
+	case 1:
+		c.Version, c.Members, c.MembersFetched, c.MembersTried, c.MembersErr = ixCacheVersion, nil, time.Time{}, time.Time{}, ""
+	default:
+		return empty
+	}
+	return c
+}
+
+func (e *Enricher) writeIXCache(c ixCache) {
+	path := e.ixCachePath()
+	if path == "" {
 		return
 	}
-	e.ix.set(p)
-	if path := e.ixCachePath(); path != "" {
-		b, _ := json.Marshal(ixCache{Version: ixCacheVersion, Source: e.opt.PDB, Fetched: time.Now(), Prefixes: p})
-		if os.MkdirAll(filepath.Dir(path), 0o755) == nil {
-			tmp := path + ".tmp"
-			if os.WriteFile(tmp, b, 0o644) == nil {
-				os.Rename(tmp, path)
-			}
+	b, _ := json.Marshal(c)
+	if os.MkdirAll(filepath.Dir(path), 0o755) == nil {
+		tmp := path + ".tmp"
+		if os.WriteFile(tmp, b, 0o644) == nil {
+			os.Rename(tmp, path)
 		}
 	}
 }
 
+// loadIX uses the cached lists younger than ixFresh and downloads the
+// others from PeeringDB, unless a download of that list failed less than
+// ixRetry ago. A list that cannot be had falls back to an older copy; IX
+// hops are marked as long as the prefixes are known, with the member
+// network only when the member list is too.
+func (e *Enricher) loadIX() {
+	c := e.readIXCache()
+	now := time.Now()
+	cl := &http.Client{Timeout: 30 * time.Second}
+	changed := false
+	due := func(fetched, tried time.Time) (ask, refused bool) {
+		if now.Sub(fetched) < ixFresh {
+			return false, false
+		}
+		if now.Sub(tried) < ixRetry {
+			return false, true
+		}
+		return true, false
+	}
+	// What is used instead, and when PeeringDB is asked again.
+	instead := func(fetched, tried time.Time, without string) string {
+		s := "; asked again after " + tried.Add(ixRetry).Format("15:04")
+		if fetched.IsZero() {
+			return s + ": " + without
+		}
+		return s + "; using data from " + fetched.Format("2006-01-02")
+	}
+	const noIX, noMember = "IX hops are not marked", "IX hops are shown without the member network"
+
+	switch ask, refused := due(c.Fetched, c.Tried); {
+	case ask:
+		changed = true
+		if p, err := fetchIX(cl, e.opt.PDB); err == nil {
+			c.Prefixes, c.Fetched, c.Tried, c.Err = p, now, time.Time{}, ""
+		} else {
+			c.Tried, c.Err = now, err.Error()
+			e.warnOnce("ix", "ix: PeeringDB download failed ("+c.Err+")"+instead(c.Fetched, c.Tried, noIX))
+		}
+	case refused:
+		e.warnOnce("ix", "ix: PeeringDB download failed at "+c.Tried.Format("15:04")+" ("+c.Err+")"+instead(c.Fetched, c.Tried, noIX))
+	}
+	if len(c.Prefixes) > 0 {
+		switch ask, refused := due(c.MembersFetched, c.MembersTried); {
+		case ask:
+			changed = true
+			if m, err := fetchIXMembers(cl, e.opt.PDB); err == nil {
+				c.Members, c.MembersFetched, c.MembersTried, c.MembersErr = m, now, time.Time{}, ""
+			} else {
+				c.MembersTried, c.MembersErr = now, err.Error()
+				e.warnOnce("ix-members", "ix: PeeringDB member list failed ("+c.MembersErr+")"+
+					instead(c.MembersFetched, c.MembersTried, noMember))
+			}
+		case refused:
+			e.warnOnce("ix-members", "ix: PeeringDB member list failed at "+c.MembersTried.Format("15:04")+" ("+c.MembersErr+")"+
+				instead(c.MembersFetched, c.MembersTried, noMember))
+		}
+	}
+	e.ix.set(c.Prefixes, c.Members)
+	if changed {
+		e.writeIXCache(c)
+	}
+}
+
+// pdbGet fetches one PeeringDB API list into v.
+func pdbGet(cl *http.Client, base, path string, v any) error {
+	req, err := http.NewRequest("GET", base+"/"+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "mpmtr")
+	r, err := cl.Do(req)
+	if err != nil {
+		return err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != 200 {
+		// PeeringDB says why in a JSON "message" (HTTP 429: "Request was
+		// throttled. Expected available in 55 minutes. …").
+		var m struct {
+			Message string `json:"message"`
+		}
+		why := ""
+		if json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&m) == nil && m.Message != "" {
+			why = ": " + firstSentences(m.Message, 2)
+		}
+		name, _, _ := strings.Cut(path, "?")
+		return fmt.Errorf("%s: HTTP %d%s", name, r.StatusCode, why)
+	}
+	return json.NewDecoder(io.LimitReader(r.Body, 64<<20)).Decode(v) // the lists are a few MB
+}
+
+// firstSentences is the first n sentences of s.
+func firstSentences(s string, n int) string {
+	for i, c := range s {
+		if c == '.' && (i+1 == len(s) || s[i+1] == ' ') {
+			if n--; n == 0 {
+				return s[:i+1]
+			}
+		}
+	}
+	return s
+}
+
 // fetchIX joins PeeringDB's ixpfx (prefix -> ixlan), ixlan (-> ix) and ix
 // (-> name) lists.
-func fetchIX(base string) ([]ixPrefix, error) {
-	cl := &http.Client{Timeout: 30 * time.Second}
-	get := func(path string, v any) error {
-		req, err := http.NewRequest("GET", base+"/"+path, nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("User-Agent", "mpmtr")
-		r, err := cl.Do(req)
-		if err != nil {
-			return err
-		}
-		defer r.Body.Close()
-		if r.StatusCode != 200 {
-			return fmt.Errorf("%s: HTTP %d", path, r.StatusCode)
-		}
-		return json.NewDecoder(io.LimitReader(r.Body, 64<<20)).Decode(v) // the lists are a few MB
-	}
+func fetchIX(cl *http.Client, base string) ([]ixPrefix, error) {
 	var ixs struct {
 		Data []struct {
 			ID   int    `json:"id"`
@@ -248,13 +374,13 @@ func fetchIX(base string) ([]ixPrefix, error) {
 			LAN    int    `json:"ixlan_id"`
 		} `json:"data"`
 	}
-	if err := get("ix?fields=id,name", &ixs); err != nil {
+	if err := pdbGet(cl, base, "ix?fields=id,name", &ixs); err != nil {
 		return nil, err
 	}
-	if err := get("ixlan?fields=id,ix_id", &lans); err != nil {
+	if err := pdbGet(cl, base, "ixlan?fields=id,ix_id", &lans); err != nil {
 		return nil, err
 	}
-	if err := get("ixpfx?fields=prefix,ixlan_id", &pfx); err != nil {
+	if err := pdbGet(cl, base, "ixpfx?fields=prefix,ixlan_id", &pfx); err != nil {
 		return nil, err
 	}
 	name := map[int]string{}
@@ -275,6 +401,52 @@ func fetchIX(base string) ([]ixPrefix, error) {
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no IX prefixes in the answer")
+	}
+	return out, nil
+}
+
+// fetchIXMembers joins PeeringDB's netixlan (member address on a peering
+// LAN -> ASN) and net (ASN -> network name) lists.
+func fetchIXMembers(cl *http.Client, base string) ([]ixMember, error) {
+	var nixl struct {
+		Data []struct {
+			ASN uint32  `json:"asn"`
+			IP4 *string `json:"ipaddr4"`
+			IP6 *string `json:"ipaddr6"`
+		} `json:"data"`
+	}
+	var nets struct {
+		Data []struct {
+			ASN  uint32 `json:"asn"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := pdbGet(cl, base, "netixlan?fields=asn,ipaddr4,ipaddr6", &nixl); err != nil {
+		return nil, err
+	}
+	if err := pdbGet(cl, base, "net?fields=asn,name", &nets); err != nil {
+		return nil, err
+	}
+	name := make(map[uint32]string, len(nets.Data))
+	for _, n := range nets.Data {
+		name[n.ASN] = n.Name
+	}
+	var out []ixMember
+	for _, x := range nixl.Data {
+		if x.ASN == 0 {
+			continue
+		}
+		for _, s := range []*string{x.IP4, x.IP6} {
+			if s == nil {
+				continue
+			}
+			if a, err := netip.ParseAddr(*s); err == nil {
+				out = append(out, ixMember{IP: a.Unmap(), ASN: x.ASN, Name: name[x.ASN]})
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no member addresses in the answer")
 	}
 	return out, nil
 }
