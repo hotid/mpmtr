@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/hotid/mpmtr/internal/wire"
@@ -42,8 +43,12 @@ func NewRouter() (*Router, error) {
 		unix.Close(fd)
 		return nil, err
 	}
+	// Without a receive timeout a lost answer would block every later lookup.
 	tv := unix.NsecToTimeval(2e9)
-	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
+	if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("netlink SO_RCVTIMEO: %w", err)
+	}
 	return &Router{fd: fd, cache: map[int]int{}, buf: make([]byte, 1<<16)}, nil
 }
 
@@ -208,47 +213,59 @@ func (r *Router) parse(body []byte, fam uint8) (RouteResult, error) {
 func (r *Router) Close() { unix.Close(r.fd) }
 
 // WatchChanges subscribes to link/address/route/rule notifications and
-// signals ch (non-blocking) on each batch. It returns when the socket
-// fails; call stop() to end it.
-func WatchChanges(ch chan<- struct{}) (stop func(), err error) {
+// signals ch (non-blocking) on each batch, and also when the kernel had to
+// drop notifications (ENOBUFS: the socket buffer overflowed), since a change
+// may be among them. It keeps watching until stop() is called; errors of the
+// socket after the start do not end it. warn lists what is not watched
+// (IPv6 rules, when that subscription fails).
+func WatchChanges(ch chan<- struct{}) (stop func(), warn []string, err error) {
 	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	groups := uint32(unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV4_ROUTE |
 		unix.RTMGRP_IPV6_IFADDR | unix.RTMGRP_IPV6_ROUTE | 0x80 /* RTMGRP_IPV4_RULE */)
 	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Groups: groups}); err != nil {
 		unix.Close(fd)
-		return nil, err
+		return nil, nil, err
 	}
-	_ = unix.SetsockoptInt(fd, unix.SOL_NETLINK, unix.NETLINK_ADD_MEMBERSHIP, unix.RTNLGRP_IPV6_RULE)
+	if err := unix.SetsockoptInt(fd, unix.SOL_NETLINK, unix.NETLINK_ADD_MEMBERSHIP, unix.RTNLGRP_IPV6_RULE); err != nil {
+		warn = append(warn, fmt.Sprintf("changes of IPv6 routing rules are not followed: %v", err))
+	}
+	// The timeout lets the reader see stop() in time.
 	tv := unix.NsecToTimeval(2e8)
-	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
-	var mu sync.Mutex
-	stopped := false
+	if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+		unix.Close(fd)
+		return nil, nil, fmt.Errorf("netlink SO_RCVTIMEO: %w", err)
+	}
+	var stopped atomic.Bool
 	go func() {
 		buf := make([]byte, 1<<16)
-		for {
-			mu.Lock()
-			s := stopped
-			mu.Unlock()
-			if s {
-				unix.Close(fd)
-				return
-			}
-			n, _, err := unix.Recvfrom(fd, buf, 0)
-			if err != nil {
-				continue
-			}
-			if n > 0 {
-				select {
-				case ch <- struct{}{}:
-				default:
-				}
-			}
-		}
+		watchLoop(func() (int, error) { n, _, err := unix.Recvfrom(fd, buf, 0); return n, err }, ch, stopped.Load)
+		unix.Close(fd)
 	}()
-	return func() { mu.Lock(); stopped = true; mu.Unlock() }, nil
+	return func() { stopped.Store(true) }, warn, nil
+}
+
+// watchLoop reads notifications until stopped() and signals ch
+// (non-blocking) on each batch and on ENOBUFS.
+func watchLoop(recv func() (int, error), ch chan<- struct{}, stopped func() bool) {
+	for !stopped() {
+		n, err := recv()
+		switch {
+		case errors.Is(err, unix.ENOBUFS):
+			// Notifications were dropped: a change may be among them.
+		case err != nil:
+			// The receive timeout (EAGAIN), EINTR or another error: read again.
+			continue
+		case n == 0:
+			continue
+		}
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // Nexthop of a matched FIB entry.

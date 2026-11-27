@@ -41,6 +41,48 @@ const (
 	evApp // an application check waits for its flow's clean 4-tuple
 )
 
+// Constants of the scheduler and of a probe's life.
+const (
+	// The probe budget (--pps) is two token buckets: hop probes draw from
+	// the global one only while it keeps headroom for E2E, otherwise from a
+	// reserve of hopReserveShare, so they neither starve nor take E2E's
+	// tokens (takeHopToken).
+	hopReserveShare = 0.1
+	// The global bucket holds a hundredth of a second's budget, at least
+	// minBurst probes; the reserve a quarter of that, at least 1.
+	burstPerSecond = 100
+	minBurst       = 4
+	// The hop probes of an endpoint keep at least this share of
+	// --endpoint-pps whatever its measured flows take (retuneHop).
+	hopFloorShare = 0.1
+	// An E2E probe whose port's previous probe ends within interval /
+	// deferDivisor is sent right after it instead of being skipped: room
+	// for the slot jitter of ±5 % and about 10 % of deferral.
+	deferDivisor = 5
+	// The ISN clock ticks every 4 µs (RFC 6528), plus a random part below
+	// isnJitter.
+	isnTick   = 4 * time.Microsecond
+	isnJitter = 1024
+	// A deadline the capture watermark has not reached is looked at again
+	// every watermarkPoll; behind by more than watermarkStall the probe is
+	// capture-impaired, not lost.
+	watermarkPoll  = 5 * time.Millisecond
+	watermarkStall = time.Second
+	// A completed probe waits at most finalizeWait for its own SYN and the
+	// kernel's RST to be seen before its result is recorded.
+	finalizeWait = 200 * time.Millisecond
+	// A captured send time further than txTimeTolerance from the time the
+	// probe was sent is not used for the RTT.
+	txTimeTolerance = 50 * time.Millisecond
+	// A period of capture drops starts dropPad before the watermark it
+	// follows; the last dropHistory periods are kept.
+	dropPad     = 20 * time.Millisecond
+	dropHistory = 64
+	// With --max-inflight probes in flight the scheduler looks again after
+	// inflightPoll.
+	inflightPoll = time.Millisecond
+)
+
 type event struct {
 	at   Mono
 	kind evKind
@@ -183,7 +225,7 @@ type Core struct {
 
 	watermarkRT  Wall
 	lastWMMono   Mono
-	drops        [64]dropPeriod
+	drops        [dropHistory]dropPeriod
 	dropPos      int
 	lastDropMono Mono
 	impairedNow  bool
@@ -219,9 +261,9 @@ func New(cfg Config, tr Transport, env Env, clk Clock) *Core {
 		rng:    rand.New(rand.NewPCG(seed^0x9e3779b97f4a7c15, uint64(time.Now().UnixNano()))),
 		evalBN: -1,
 	}
-	burst := max(4, cfg.PPS/100)
-	c.global = stats.NewTokenBucket(cfg.PPS*0.9, burst)
-	c.reserve = stats.NewTokenBucket(cfg.PPS*0.1, max(1, burst/4))
+	burst := max(minBurst, cfg.PPS/burstPerSecond)
+	c.global = stats.NewTokenBucket(cfg.PPS*(1-hopReserveShare), burst)
+	c.reserve = stats.NewTokenBucket(cfg.PPS*hopReserveShare, max(1, burst/4))
 	c.ev = newEventSink(c)
 	c.now, c.nowRT = clk.Now()
 	c.bucket = Mono(c.cfg.BucketDur())
@@ -405,7 +447,7 @@ func (c *Core) hash64(parts ...uint64) uint64 {
 // not need: E2E and hop probes together stay within --endpoint-pps.
 func (c *Core) retuneHop(ep *Endpoint) {
 	demand := float64(ep.measuring) / c.cfg.Interval.Seconds()
-	ep.hopBucket.Rate = max(c.cfg.EndpointPPS-demand, c.cfg.EndpointPPS/10)
+	ep.hopBucket.Rate = max(c.cfg.EndpointPPS-demand, c.cfg.EndpointPPS*hopFloorShare)
 }
 
 func (c *Core) activate(f *Flow, role Role) {
@@ -545,9 +587,8 @@ func (c *Core) e2eSlot(f *Flow, due Mono) {
 			// A hop probe still waiting cannot reach the destination: cancel
 			// it (never a loss) and give the slot to E2E.
 			c.complete(p, OutCancelled)
-		case p.deadMono-c.now <= iv/5:
-			// The previous probe ends within the bounded jitter budget
-			// (slot jitter ±5% plus ~10% deferral):
+		case p.deadMono-c.now <= iv/deferDivisor:
+			// The previous probe ends within the bounded jitter budget:
 			// send right after it completes instead of skipping.
 			f.e2eDeferred = true
 			return
@@ -661,9 +702,9 @@ func (c *Core) sendProbe(f *Flow, class Class, ttl TTL, timeout Mono, burst bool
 	// (RFC 793 re-initialization); a SYN with an earlier seq is dropped as
 	// INVALID, which would be loss made by the measurer.
 	for {
-		p.seq = uint32(c.nowRT/4000) + f.isnF + c.rng.Uint32()%1024
+		p.seq = uint32(c.nowRT/Wall(isnTick)) + f.isnF + c.rng.Uint32()%isnJitter
 		if f.lastSeq != 0 && int32(p.seq-f.lastSeq) <= 0 {
-			p.seq = f.lastSeq + 1 + c.rng.Uint32()%1024
+			p.seq = f.lastSeq + 1 + c.rng.Uint32()%isnJitter
 		}
 		f.lastSeq = p.seq
 		if p.seq == 0 {
@@ -719,12 +760,12 @@ func (c *Core) deadline(p *Probe) {
 		return
 	}
 	if c.watermarkRT < p.deadRT {
-		if c.now-p.deadMono > Mono(time.Second) {
+		if c.now-p.deadMono > Mono(watermarkStall) {
 			c.M.WatermarkStalls++
 			c.complete(p, OutCaptureImpaired)
 			return
 		}
-		c.push(event{at: c.now + Mono(5*time.Millisecond), kind: evDeadline, p: p, gen: p.id})
+		c.push(event{at: c.now + Mono(watermarkPoll), kind: evDeadline, p: p, gen: p.id})
 		return
 	}
 	o := OutTimeout
@@ -778,7 +819,7 @@ func (c *Core) complete(p *Probe, o Outcome) {
 	if c.finalizable(p) {
 		c.finalize(p)
 	} else {
-		c.push(event{at: c.now + Mono(200*time.Millisecond), kind: evFinalize, p: p, gen: p.id})
+		c.push(event{at: c.now + Mono(finalizeWait), kind: evFinalize, p: p, gen: p.id})
 	}
 	if f.e2eDeferred && p.class == ClassE2E {
 		f.e2eDeferred = false
@@ -828,7 +869,7 @@ func (c *Core) rttUs(p *Probe) (uint32, bool) {
 	kern := false
 	if p.txSeen && p.txRT != 0 {
 		// Sanity: the captured TX timestamp must be close to our send time.
-		if d := p.txRT.Sub(p.sentRT); d > -50*time.Millisecond && d < 50*time.Millisecond {
+		if d := p.txRT.Sub(p.sentRT); d > -txTimeTolerance && d < txTimeTolerance {
 			start, kern = p.txRT, true
 		}
 	}
@@ -876,7 +917,7 @@ func (c *Core) runReady() Mono {
 			c.drrDef[cl] += drrWeight[cl]
 			for c.drrDef[cl] > 0 && q.size > 0 {
 				if c.inflight >= c.cfg.MaxInflight {
-					return c.now + Mono(time.Millisecond)
+					return c.now + Mono(inflightPoll)
 				}
 				if c.global.Tokens(int64(c.now)) < c.global.Burst/2+1 && !c.reserve.Available(int64(c.now)) {
 					setWake(Mono(min(c.global.NextAt(int64(c.now)), c.reserve.NextAt(int64(c.now)))))
@@ -966,9 +1007,9 @@ func (c *Core) OnWatermark(rt Wall, kernelDrops, userDrops uint64) {
 func (c *Core) OnWatermarkDrops(rt Wall, kernelDrops, userDrops uint64, dropFrom, dropTo Wall) {
 	c.now, c.nowRT = c.clk.Now()
 	if kernelDrops+userDrops > 0 {
-		from := c.watermarkRT.Add(-20 * time.Millisecond)
+		from := c.watermarkRT.Add(-dropPad)
 		if dropFrom != 0 {
-			from = min(from, dropFrom.Add(-20*time.Millisecond))
+			from = min(from, dropFrom.Add(-dropPad))
 		}
 		if c.watermarkRT == 0 {
 			from = 0

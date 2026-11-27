@@ -136,16 +136,21 @@ func StartPlugin(path string, args []string) (*Plugin, error) {
 	return p, nil
 }
 
-func (p *Plugin) recv(timeout time.Duration) (pluginMsg, error) {
-	var m pluginMsg
+func (p *Plugin) recv(timeout time.Duration) (m pluginMsg, err error) {
 	if timeout > 0 {
 		tv := unix.NsecToTimeval(int64(timeout))
-		_ = unix.SetsockoptTimeval(p.fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
-		defer unix.SetsockoptTimeval(p.fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{})
+		if err := unix.SetsockoptTimeval(p.fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+			return m, fmt.Errorf("SO_RCVTIMEO: %w", err)
+		}
+		// A timeout left on the socket would end the read loop's waits.
+		defer func() {
+			if e := unix.SetsockoptTimeval(p.fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{}); e != nil && err == nil {
+				err = fmt.Errorf("SO_RCVTIMEO: %w", e)
+			}
+		}()
 	}
 	buf := make([]byte, 64<<10)
 	var n int
-	var err error
 	for end := time.Now().Add(timeout); ; {
 		// A signal (the Go runtime sends them to its own threads) may
 		// interrupt the wait: that is not the plugin failing to answer.

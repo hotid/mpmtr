@@ -165,9 +165,13 @@ Levels:
   port in that state is a healthy control when other ports fail at TCP.
 
 Hop loss analysis reports `suspected_loss_start_ttl` only when elevated
-apparent loss persists downstream (and says so when the later hops gave no
-data either way); a hop whose loss a later hop significantly does not have
-is `icmp-limit?`.
+apparent loss on an answering hop persists on every later answering hop
+(and says so when the later hops gave no data either way); a hop whose
+loss a later hop significantly does not have is `icmp-limit?`, and is not
+where loss starts. A hop that never answers neither starts loss nor
+confirms it: a router may simply not answer ICMP. The exception is a port
+that is DOWN with no answer at all from some TTL on, the destination
+included: the loss is reported to start there.
 
 Every result lists supporting and contradicting observations and its
 limitations. No numeric confidence is invented.

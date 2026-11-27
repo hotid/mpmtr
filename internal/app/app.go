@@ -349,8 +349,18 @@ func Start(o *Options) (*Runtime, error) {
 			rt.failed <- fmt.Errorf("packet capture failed: %w", err)
 		}
 	}()
-	if stop, err := sys.WatchChanges(rt.routeCh); err == nil {
+	stop, warn, err := sys.WatchChanges(rt.routeCh)
+	if err != nil {
+		warn = append(warn, fmt.Sprintf("changes of local routes and addresses are not followed: %v", err))
+	} else {
 		rt.stopW = stop
+	}
+	warn = append(append(warn, rt.snd.Warnings...), rt.cap.Warnings...)
+	if w := rt.res.Warning(); w != "" {
+		warn = append(warn, w)
+	}
+	for _, w := range warn {
+		o.Warnings = append(o.Warnings, "warning: "+w)
 	}
 	return rt, nil
 }

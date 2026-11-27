@@ -2075,3 +2075,40 @@ func TestSlotsAfterLongPause(t *testing.T) {
 		t.Fatalf("next slot %v from now", time.Duration(f.nextE2E-s.now))
 	}
 }
+
+// The start of loss follows the rule of the tree marks: a hop that never
+// answers neither starts loss nor confirms it downstream, a rate-limited hop
+// (a later hop loses significantly less, even if still some) is not the
+// start, and loss that a later answering hop does not show does not persist.
+// A port that is DOWN with nothing answering from some TTL on has its loss
+// start there.
+func TestLossStartTTL(t *testing.T) {
+	path := func(hs ...[2]uint32) *Flow { // {replies, timeouts} per TTL
+		r := &RouteObs{}
+		for _, h := range hs {
+			r.hops = append(r.hops, HopStat{Replies: h[0], Timeouts: h[1], Sent: h[0] + h[1]})
+		}
+		return &Flow{Num: 1, route: r}
+	}
+	down := func(f *Flow) *Flow { f.sm.avail = AvailDown; return f }
+	cases := []struct {
+		name string
+		f    *Flow
+		want TTL
+		tail string
+	}{
+		{"silent hop is not the start", path([2]uint32{50, 0}, [2]uint32{0, 50}, [2]uint32{25, 25}, [2]uint32{24, 26}), 3, "persists downstream"},
+		{"silent hops below confirm nothing", path([2]uint32{50, 0}, [2]uint32{25, 25}, [2]uint32{0, 50}, [2]uint32{0, 50}), 2, "no data from later hops"},
+		{"rate-limited hop is not the start", path([2]uint32{100, 100}, [2]uint32{170, 30}, [2]uint32{168, 32}), 2, "persists downstream"},
+		{"loss gone below", path([2]uint32{25, 25}, [2]uint32{50, 0}), 0, ""},
+		{"only silent hops", path([2]uint32{0, 50}, [2]uint32{0, 50}), 0, ""},
+		{"black hole of a port that is DOWN", down(path([2]uint32{50, 0}, [2]uint32{0, 20}, [2]uint32{0, 20})), 2, "no answer from TTL 2 on"},
+		{"silent router before an answering hop, DOWN", down(path([2]uint32{0, 50}, [2]uint32{50, 0}, [2]uint32{0, 20})), 3, "no answer from TTL 3 on"},
+	}
+	for _, tc := range cases {
+		got, sup := lossStartTTL(tc.f)
+		if got != tc.want || !strings.Contains(sup, tc.tail) {
+			t.Errorf("%s: start %d %q, want %d %q", tc.name, got, sup, tc.want, tc.tail)
+		}
+	}
+}

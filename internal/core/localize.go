@@ -116,7 +116,7 @@ func (c *Core) localize(ep *Endpoint) {
 	// persist downstream is likely ICMP rate limiting, not transit loss).
 	start := TTL(0)
 	for _, f := range bad {
-		if t, sup := c.lossStartTTL(f); t > 0 {
+		if t, sup := lossStartTTL(f); t > 0 {
 			if start == 0 || t < start {
 				start = t
 			}
@@ -228,41 +228,41 @@ func groupName(f *Flow) string {
 	return f.group.ID + " " + f.level.String()
 }
 
-// lossStartTTL finds the first TTL from which apparent hop loss is elevated
-// and persists on every downstream hop of a failing flow.
-func (c *Core) lossStartTTL(f *Flow) (TTL, string) {
+// lossStartTTL finds the first TTL of a failing flow from which apparent hop
+// loss persists downstream, by the rule the tree marks use (markDownstream):
+// the hop answers and loses significantly (lossElevated), it is not rate
+// limited (possibleRateLimit: no later answering hop loses significantly
+// less), and every later answering hop loses significantly too. A hop that
+// never answers says nothing about loss: it neither starts loss nor shows
+// that loss persists. The one exception is a port that is DOWN and gets no
+// answer from some TTL on, the destination included: nothing passes beyond
+// that point, so the loss starts there (or the router there does not
+// answer and it starts right after).
+func lossStartTTL(f *Flow) (TTL, string) {
 	r := f.route
 	L := r.top()
 	if r.distance > 0 {
 		L = min(L, r.distance)
 	}
-	elevated := func(h *HopStat) (bool, bool) {
-		n := int64(h.Replies + h.Timeouts)
-		if n < 5 {
-			return false, false
-		}
-		lo, _ := stats.Wilson(int64(h.Timeouts), n)
-		return lo > 0.05, true
-	}
 	for t := TTL(1); t <= L; t++ {
 		h := r.hopIf(t)
-		e, ok := elevated(h)
-		if !ok || !e {
+		if !hopAnswers(h) || !lossElevated(h.Timeouts, h.Replies+h.Timeouts) || possibleRateLimit(r, t) {
 			continue
 		}
 		persist, seen := true, 0
 		for u := t + 1; u <= L; u++ {
-			e2, ok2 := elevated(r.hopIf(u))
-			if ok2 && !e2 {
+			d := r.hopIf(u)
+			if !hopAnswers(d) {
+				continue
+			}
+			if !lossElevated(d.Timeouts, d.Replies+d.Timeouts) {
 				persist = false
 				break
 			}
-			if ok2 {
-				seen++
-			}
+			seen++
 		}
 		if persist {
-			// Hops without enough probes neither confirm nor refute: say
+			// Silent hops and hops with too few probes neither confirm nor refute: say
 			// "persists" only when a later hop actually shows it.
 			tail := "and persists downstream"
 			if seen == 0 {
@@ -271,7 +271,28 @@ func (c *Core) lossStartTTL(f *Flow) (TTL, string) {
 			return t, fmt.Sprintf("%s: apparent hop loss starts at TTL %d (%d/%d) %s", f.Name(), t, h.Timeouts, h.Replies+h.Timeouts, tail)
 		}
 	}
+	if f.State() != FDown {
+		return 0, ""
+	}
+	for t := TTL(1); t <= L; t++ {
+		h := r.hopIf(t)
+		if h.Replies > 0 || h.Timeouts < 5 {
+			continue
+		}
+		silent := true
+		for u := t + 1; u <= L && silent; u++ {
+			silent = r.hopIf(u).Replies == 0
+		}
+		if silent {
+			return t, fmt.Sprintf("%s: no answer from TTL %d on (%d/%d), the destination included", f.Name(), t, h.Timeouts, h.Timeouts)
+		}
+	}
 	return 0, ""
+}
+
+// hopAnswers: the hop has replied and has enough probes to judge its loss.
+func hopAnswers(h *HopStat) bool {
+	return h != nil && h.Replies > 0 && h.Replies+h.Timeouts >= 5
 }
 
 // possibleRateLimit: elevated apparent loss on a hop that does not persist

@@ -117,8 +117,9 @@ func parseProcAddr(h string) netip.Addr {
 // is not in the listen/established hash: an incoming SYN/ACK for our raw
 // SYN still finds no socket and the kernel answers with RST.
 type Reserver struct {
-	mu  sync.Mutex
-	fds map[netip.AddrPort]int
+	mu   sync.Mutex
+	fds  map[netip.AddrPort]int
+	warn string // the first SO_REUSEPORT failure
 }
 
 // NewReserver creates an empty reserver.
@@ -143,12 +144,18 @@ func (r *Reserver) Reserve(src netip.Addr, port wire.Port) error {
 	// SO_REUSEPORT lets mpmtr itself open a real connection from this port
 	// (application checks) while the reservation stays; other programs can
 	// share it only as the same user AND with SO_REUSEPORT set.
-	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+	// Without it the port is still reserved; only those connections fail.
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil && r.warn == "" {
+		r.warn = fmt.Sprintf("SO_REUSEPORT on reserved source ports: %v (application checks cannot use them)", err)
+	}
 	var sa unix.Sockaddr
 	if fam == unix.AF_INET {
 		sa = &unix.SockaddrInet4{Addr: src.As4(), Port: int(port)}
 	} else {
-		_ = unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1)
+		if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1); err != nil {
+			unix.Close(fd)
+			return fmt.Errorf("reserve %s: IPV6_V6ONLY: %w", k, err)
+		}
 		sa = &unix.SockaddrInet6{Addr: src.As16(), Port: int(port)}
 	}
 	if err := unix.Bind(fd, sa); err != nil {
@@ -160,6 +167,14 @@ func (r *Reserver) Reserve(src netip.Addr, port wire.Port) error {
 	}
 	r.fds[k] = fd
 	return nil
+}
+
+// Warning returns why reserved ports cannot be shared with mpmtr's own
+// connections, or "".
+func (r *Reserver) Warning() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.warn
 }
 
 // Count returns the number of held reservations.

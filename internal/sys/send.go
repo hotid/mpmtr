@@ -38,6 +38,9 @@ type SenderOpts struct {
 // implied), IPv6 uses IPPROTO_RAW which on Linux implies IPV6_HDRINCL, so
 // hop limit, traffic class and flow label are exactly as built.
 type Sender struct {
+	// Warnings lists socket options that could not be set; the sender
+	// works without them.
+	Warnings []string
 	fd4, fd6 int
 	buf      [128]byte
 	oob4     map[int][]byte
@@ -55,7 +58,9 @@ func NewSender(v4, v6 bool, o SenderOpts) (*Sender, error) {
 			}
 			return -1, fmt.Errorf("raw socket: %w", err)
 		}
-		_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, 4<<20)
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, 4<<20); err != nil {
+			s.Warnings = append(s.Warnings, fmt.Sprintf("raw socket SO_SNDBUF: %v (sends may fail with ENOBUFS at high rates)", err))
+		}
 		if o.Interface != "" {
 			if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, o.Interface); err != nil {
 				unix.Close(fd)
@@ -81,9 +86,12 @@ func NewSender(v4, v6 bool, o SenderOpts) (*Sender, error) {
 			s.Close()
 			return nil, err
 		}
-		// Kernels honour IPV6_HDRINCL implicitly for IPPROTO_RAW; set it
-		// explicitly where supported (Linux >= 4.5) and verify by capture.
-		_ = unix.SetsockoptInt(s.fd6, unix.IPPROTO_IPV6, 36 /* IPV6_HDRINCL */, 1)
+		// IPPROTO_RAW implies IPV6_HDRINCL; it is also set explicitly where
+		// the option exists (Linux >= 4.5). Where it cannot be set, the
+		// header is still sent as built unless the kernel is older still.
+		if err := unix.SetsockoptInt(s.fd6, unix.IPPROTO_IPV6, unix.IPV6_HDRINCL, 1); err != nil {
+			s.Warnings = append(s.Warnings, fmt.Sprintf("IPV6_HDRINCL: %v (IPv6 probes rely on IPPROTO_RAW implying it)", err))
+		}
 	}
 	return s, nil
 }

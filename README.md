@@ -68,7 +68,7 @@ TTL   HOST               Loss%  Snt    Last     Med     P95  FLAGS
 
 localization: SUSPECTED_SEGMENT  suspected segments: 10.10.0.1→10.11.2.2  suspected loss start TTL 3
   + F5 sport 20004 DOWN: 120/120 failures in 5 min
-  + F5: apparent hop loss starts at TTL 3 (20/20) and persists downstream
+  + F5: no answer from TTL 3 on (20/20), the destination included
   + segments seen in all failing groups and in no healthy group
   - segment SRC→10.10.0.1 is shared with healthy groups
   ! observed responder addresses do not identify physical links

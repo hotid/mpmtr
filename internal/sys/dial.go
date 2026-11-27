@@ -108,7 +108,10 @@ func DialFrom(src netip.Addr, sport wire.Port, dst netip.Addr, dport wire.Port, 
 		unix.Close(fd)
 		return -1, 0, false, e
 	}
-	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+	// The port is held by a reservation (Reserver) that allows sharing.
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+		return fail(fmt.Errorf("SO_REUSEPORT: %w", err))
+	}
 	if err := unix.SetsockoptLinger(fd, unix.SOL_SOCKET, unix.SO_LINGER, &unix.Linger{Onoff: 1, Linger: 0}); err != nil {
 		return fail(err)
 	}
@@ -130,7 +133,9 @@ func DialFrom(src netip.Addr, sport wire.Port, dst netip.Addr, dport wire.Port, 
 			return fail(fmt.Errorf("TOS: %w", err))
 		}
 	} else {
-		_ = unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1)
+		if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1); err != nil {
+			return fail(fmt.Errorf("IPV6_V6ONLY: %w", err))
+		}
 		la = &unix.SockaddrInet6{Addr: src.As16(), Port: int(sport)}
 		if err := setIdentity6(fd, dst, o.TOS, o.FlowLabel); err != nil {
 			return fail(err)

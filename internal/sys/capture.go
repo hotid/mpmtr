@@ -30,6 +30,9 @@ type CaptureOpts struct {
 // including kernel RSTs are visible) with a PACKET_RX_RING TPACKET_V3 ring
 // and a classic BPF filter evaluated in the kernel.
 type Capture struct {
+	// Warnings lists socket options that could not be set; the capture
+	// works without them.
+	Warnings  []string
 	fd        int
 	ring      []byte
 	bsize     int
@@ -194,7 +197,9 @@ func NewCapture(o CaptureOpts) (*Capture, error) {
 	}
 	// Kernel software RX timestamps for every packet (also enables
 	// netstamp so skb->tstamp is set at receive time).
-	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TIMESTAMPNS, 1)
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TIMESTAMPNS, 1); err != nil {
+		c.Warnings = append(c.Warnings, fmt.Sprintf("capture SO_TIMESTAMPNS: %v (packet times may be taken later than arrival)", err))
+	}
 	req := unix.TpacketReq3{Block_size: uint32(o.BlockSize), Block_nr: uint32(o.BlockNr),
 		Frame_size: 2048, Frame_nr: uint32(o.BlockSize / 2048 * o.BlockNr), Retire_blk_tov: uint32(o.RetireTovMs)}
 	if err := unix.SetsockoptTpacketReq3(fd, unix.SOL_PACKET, unix.PACKET_RX_RING, &req); err != nil {
