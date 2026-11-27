@@ -597,7 +597,8 @@ func (c *Core) nextHopTTL(f *Flow, cl Class) TTL {
 // responder was refreshed very recently by another flow of a confirmed
 // group can be skipped for a while. It is purely a budget optimization —
 // nothing is copied into this flow's statistics, and each flow still
-// re-probes every hop at least once a minute.
+// re-probes every hop within dedupMaxAge, before its row would turn stale
+// (hopStale: three buckets).
 func (c *Core) dedupSkip(f *Flow, t TTL) bool {
 	if c.cfg.SharedHops {
 		if h := f.route.hopIf(t); h != nil && h.cur.IsValid() && !h.Unstable {
@@ -610,12 +611,17 @@ func (c *Core) dedupSkip(f *Flow, t TTL) bool {
 		return false
 	}
 	h := f.route.hopIf(t)
-	if h == nil || !h.cur.IsValid() || h.Unstable || h.LastProbe == 0 || c.now-h.LastProbe > Mono(time.Minute) {
+	if h == nil || !h.cur.IsValid() || h.Unstable || h.LastProbe == 0 || c.now-h.LastProbe > c.dedupMaxAge() {
 		return false
 	}
 	fr, ok := c.respFresh[h.cur]
 	return ok && fr.flow != f.ID && c.now-fr.at < Mono(5*time.Second)
 }
+
+// dedupMaxAge: how long a flow may leave a hop to the other flows. Two
+// buckets: a flow probes one TTL per interval and a bucket is ten, so the
+// round after the limit fits before the third bucket ends.
+func (c *Core) dedupMaxAge() Mono { return 2 * c.bucket }
 
 func (c *Core) respKeyFor(f *Flow, ttl TTL) respKey {
 	if h := f.route.hopIf(ttl); h != nil {

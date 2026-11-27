@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -43,15 +44,46 @@ func init() {
 	}
 }
 
-// moduleVersion is the main module's version from the build info: the tag
-// for "go install …@v1.2.3", a pseudo-version for a build from a git
-// checkout; "devel" when Go recorded none.
+// moduleVersion is the version from the build info, as "make" names it
+// (git describe): the tag of a tagged build ("go install …@v1.2.3", a
+// checkout at a tag), otherwise the commit (a9681d3, with -dirty for
+// uncommitted changes) in place of Go's pseudo-version; "devel" when Go
+// recorded neither.
 func moduleVersion(bi *debug.BuildInfo, ok bool) string {
-	if !ok || bi.Main.Version == "" || bi.Main.Version == "(devel)" {
+	if !ok {
 		return "devel"
 	}
-	return bi.Main.Version
+	v := bi.Main.Version
+	if v != "" && v != "(devel)" && !pseudoVersion.MatchString(v) {
+		return v
+	}
+	rev, dirty := "", strings.HasSuffix(v, "+dirty")
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		if m := pseudoVersion.FindStringSubmatch(v); m != nil {
+			rev = m[1]
+		}
+	}
+	if rev == "" {
+		return "devel"
+	}
+	rev = rev[:min(len(rev), 7)]
+	if dirty {
+		rev += "-dirty"
+	}
+	return rev
 }
+
+// pseudoVersion matches the end of a Go pseudo-version
+// (v0.0.0-20261127120255-a9681d3c0d53, v0.1.3-0.20261127120255-…).
+var pseudoVersion = regexp.MustCompile(`[-.]\d{14}-([0-9a-f]{12})(\+dirty)?$`)
 
 // Exit codes (report mode). Priority across endpoints: execution error,
 // confirmed DOWN, insufficient data, degradation, OK.
@@ -778,7 +810,7 @@ func runLive(ctx context.Context, rt *app.Runtime, o *app.Options) int {
 	tty := term.IsTerminal(int(os.Stdout.Fd())) && !o.EventsStdout
 	switch {
 	case tty:
-		_ = ui.Run(ctx, rt, os.Stdout)
+		_ = ui.Run(ctx, rt, os.Stdout, Version)
 	case o.EventsStdout:
 		<-ctx.Done()
 	default:

@@ -432,12 +432,17 @@ on every branch, down to a destination that loses end to end, and
 **Last** and **Med** are yellow when the round-trip time stands above
 the row's own history at that hop, every hop after it and the
 destination; JSON: **loss_persists_downstream**, **rtt_shift**,
-**rtt_spike**); **stale** — not refreshed recently (the hop budget is
-shared; a DOWN flow gives every second E2E slot to its hop probes, so
-its route stays fresh); **mpls:** — the MPLS labels the router reported
-(RFC 4950): **a/b** is one label stack, outermost first; **a,b** are
-different stacks reported for different ports of this row; **unstable**
-— the responder at this TTL changes; **qseq:N** — replies matched by the
+**rtt_spike**); **stale** — the row's ports have not probed this hop for
+three statistics buckets (30 s at **-i 1**). Ports that share a router
+with other ports still probe it themselves at least every two buckets,
+so the mark is not a side effect of sharing. It does appear when the hop
+budget is short (a low **--pps** or **--endpoint-pps** with many routes)
+and while one port is in focus (**f**): the others' hop refresh waits. A
+DOWN flow gives every second E2E slot to its hop probes, so its route
+stays fresh; **mpls:** — the MPLS labels the router reported (RFC 4950):
+**a/b** is one label stack, outermost first; **a,b** are different
+stacks reported for different ports of this row; **unstable** — the
+responder at this TTL changes; **qseq:N** — replies matched by the
 fallback rule; **unreach** — ICMP unreachable seen; **AS15169 GOOGLE**,
 **IX:name**, **(DE, Frankfurt)** — the hop's network where it changes
 (see **Hop annotations**).

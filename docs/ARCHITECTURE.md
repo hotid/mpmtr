@@ -48,7 +48,11 @@ slot), so the route of a failing flow stays fresh.
 
 Shared prefixes of confirmed routes are refreshed by fewer flows
 (deduplication is a budget optimisation only; no measurement is copied
-between flows).
+between flows). A flow still probes each of its hops at least every two
+statistics buckets (20 s at the default interval), so a hop row is `stale`
+only when its own flows really did not probe it: the hop budget is short (a
+low `--pps` or `--endpoint-pps` with many routes), or one port is in focus
+(`f`) and the hop refresh of the others waits.
 
 ## Source ports
 

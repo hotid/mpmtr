@@ -168,14 +168,23 @@ func TestPreflightSkipsBusyPorts(t *testing.T) {
 }
 
 func TestModuleVersion(t *testing.T) {
-	bi := func(v string) *debug.BuildInfo { return &debug.BuildInfo{Main: debug.Module{Version: v}} }
+	bi := func(v string, settings ...string) *debug.BuildInfo {
+		b := &debug.BuildInfo{Main: debug.Module{Version: v}}
+		for i := 0; i+1 < len(settings); i += 2 {
+			b.Settings = append(b.Settings, debug.BuildSetting{Key: settings[i], Value: settings[i+1]})
+		}
+		return b
+	}
 	for _, c := range []struct {
 		bi   *debug.BuildInfo
 		ok   bool
 		want string
 	}{
 		{bi("v0.2.0"), true, "v0.2.0"},
-		{bi("v0.2.1-0.20261124000000-abcdef012345+dirty"), true, "v0.2.1-0.20261124000000-abcdef012345+dirty"},
+		{bi("v0.2.0+dirty", "vcs.revision", "abcdef0123456789", "vcs.modified", "true"), true, "v0.2.0+dirty"},
+		{bi("v0.0.0-20261127120255-a9681d3c0d53", "vcs.revision", "a9681d3c0d539de4", "vcs.modified", "false"), true, "a9681d3"},
+		{bi("v0.2.1-0.20261124000000-abcdef012345+dirty"), true, "abcdef0-dirty"},
+		{bi("(devel)", "vcs.revision", "0123456789abcdef", "vcs.modified", "true"), true, "0123456-dirty"},
 		{bi("(devel)"), true, "devel"},
 		{bi(""), true, "devel"},
 		{nil, false, "devel"},

@@ -225,8 +225,9 @@ TTL   HOST                                      Loss%  Snt    Last     Med     P
     against the 12 before), 24 end-to-end on a DST row. The text report and
     JSON have no colours; JSON has the same marks as
     `loss_persists_downstream`, `rtt_shift` and `rtt_spike`.
-  * **`stale`** (flag) — not refreshed recently: hop budget is shared, see
-    rate limits.
+  * **`stale`** (flag) — the row's ports have not probed the hop for 30 s
+    (at `-i 1`): the hop budget is short (a low `--pps` or `--endpoint-pps`
+    with many routes), or one port is in focus (`f`) and the others wait.
   * **`mpls:`** (flag) — RFC 4950 labels: `a/b` is one stack, outermost
     first; `a,b` are different stacks for different ports of the row.
   * **`unstable`** (flag) — several responders.

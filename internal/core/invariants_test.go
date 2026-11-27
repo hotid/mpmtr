@@ -2112,3 +2112,34 @@ func TestLossStartTTL(t *testing.T) {
 		}
 	}
 }
+
+// Ports that share their routers with other ports skip a hop another port
+// has just probed, but come back to it before its row would turn stale:
+// the stale mark means the hop was not probed, not that others probed it.
+func TestSharedRouterNotStale(t *testing.T) {
+	p := linear(6, 10*time.Millisecond)
+	s := newSim(t, simpleCfg(), func(*Flow, Mono) *simPath { return p })
+	s.c.cfg.Discovery = true
+	ep := s.add(64)
+	s.run(2 * time.Minute)
+	stale, shared := 0, 0
+	for i := 0; i < 24; i++ {
+		s.run(5 * time.Second)
+		for _, f := range monitored(ep) {
+			for t := TTL(1); t <= f.route.distance && f.route.distance > 0; t++ {
+				if h := f.route.hopIf(t); s.c.hopStale(h) {
+					stale++
+				}
+				if s.c.dedupSkip(f, t) {
+					shared++
+				}
+			}
+		}
+	}
+	if stale > 0 {
+		t.Fatalf("%d stale hop samples on ports that share their routers", stale)
+	}
+	if shared == 0 {
+		t.Fatal("no hop was left to another port: the test does not test sharing")
+	}
+}

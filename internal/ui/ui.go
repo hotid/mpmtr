@@ -149,6 +149,7 @@ func keyHints(s string) string {
 // UI state.
 type UI struct {
 	rt      *app.Runtime
+	version string // shown after the name in the header
 	out     *os.File
 	shown   []string // the lines on the terminal now (nil: unknown, repaint all)
 	shownW  int      // and the terminal size they were drawn for
@@ -189,8 +190,8 @@ type UI struct {
 // goroutine, so a key never waits for the measuring loop. Everything else —
 // moving the selection, folding, sorting, switching views — redraws the
 // last snapshot. All keys already typed are applied before one redraw.
-func Run(ctx context.Context, rt *app.Runtime, out *os.File) error {
-	u := &UI{rt: rt, out: out, folded: map[string]bool{}, backTo: -1} // sorted by source port
+func Run(ctx context.Context, rt *app.Runtime, out *os.File, version string) error {
+	u := &UI{rt: rt, out: out, version: version, folded: map[string]bool{}, backTo: -1} // sorted by source port
 	in := int(os.Stdin.Fd())
 	var old *term.State
 	if term.IsTerminal(in) {
@@ -719,8 +720,8 @@ func (u *UI) render(s *core.Snapshot) {
 	if s.Impaired {
 		status += "  \x1b[1;35mMONITORING_IMPAIRED: " + strings.Join(s.ImpairedReasons, ",") + "\x1b[0m"
 	}
-	add(&top, "\x1b[1mmpmtr\x1b[0m %s  view: %s%s   %s",
-		s.Time.Format("15:04:05"), viewNames[u.view], status, keyHints("[q]uit [p]ause [r]eset [d]view [s]ort ↑↓ Enter fold [-]/[+] all [*] routes Tab [?]help"))
+	add(&top, "\x1b[1mmpmtr\x1b[0m %s %s  view: %s%s   %s",
+		u.version, s.Time.Format("15:04:05"), viewNames[u.view], status, keyHints("[q]uit [p]ause [r]eset [d]view [s]ort ↑↓ Enter fold [-]/[+] all [*] routes Tab [?]help"))
 	for _, wn := range u.rt.Warnings() {
 		add(&top, "\x1b[33m! %s\x1b[0m", wn)
 	}
